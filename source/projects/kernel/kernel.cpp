@@ -67,19 +67,6 @@ private:
             object_post((t_object*)m_max_obj, "kernel: executing code: %s", code.c_str());
         }
 
-        // Create reply
-        nl::json reply;
-        reply["status"] = "ok";
-        reply["execution_count"] = execution_counter;
-        reply["user_expressions"] = nl::json::object();
-
-        // Publish execution result
-        if (!config.silent) {
-            nl::json pub_data;
-            pub_data["text/plain"] = "Executed in Max: " + code;
-            publish_execution_result(execution_counter, pub_data, nl::json::object());
-        }
-
         // Send to Max outlet
         if (m_max_obj && m_max_obj->outlet_left) {
             t_atom atoms[2];
@@ -87,6 +74,24 @@ private:
             atom_setsym(&atoms[1], gensym(code.c_str()));
             outlet_anything(m_max_obj->outlet_left, gensym("code"), 2, atoms);
         }
+
+        // Publish execution input (this is what shows In[n]: in Jupyter)
+        if (!config.silent) {
+            publish_execution_input(code, execution_counter);
+        }
+
+        // Publish execution result as stream output
+        if (!config.silent) {
+            std::string output = "Executed in Max: " + code;
+            publish_stream("stdout", output);
+        }
+
+        // Create successful reply
+        nl::json reply;
+        reply["status"] = "ok";
+        reply["execution_count"] = execution_counter;
+        reply["user_expressions"] = nl::json::object();
+        reply["payload"] = nl::json::array();
 
         cb(reply);
     }

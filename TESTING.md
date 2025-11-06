@@ -145,21 +145,22 @@ uv run jupyter notebook
 - Code inspection returns not found (can be extended)
 - Execution currently echoes to Max but could be extended to actually evaluate Max code
 
-## Known Issues
+## Known Issues - RESOLVED! ✅
 
-### Jupyter Console Exception
+### ~~Jupyter Console Parent Header Exception~~ - FIXED
 
-When using `jupyter console --existing`, you may see:
+**Previous Issue:** jupyter-console would crash with `'NoneType' object has no attribute 'get'` when connecting to the kernel.
+
+**Root Cause:** xeus-zmq was sending JSON `null` for `parent_header` instead of empty object `{}` in startup messages. This was because `nl::json` default-constructs to `null` instead of `{}`.
+
+**Fix:** Patched `xeus-zmq/src/server/xpublisher.cpp` to explicitly initialize `parent_header` and `metadata` as empty objects:
+
+```cpp
+data.m_parent_header = nl::json::object();
+data.m_metadata = nl::json::object();
 ```
-Exception 'NoneType' object has no attribute 'get'
-```
 
-This is a known issue with `jupyter-console` and certain message patterns. **It's harmless** - the kernel works perfectly and code execution continues normally.
-
-**Workarounds:**
-- Use Jupyter Lab instead (recommended)
-- Ignore the exception and press ENTER to continue
-- The kernel functionality is not affected
+**Status:** ✅ Fixed and working! Jupyter console now connects without any exceptions.
 
 ## Troubleshooting
 
