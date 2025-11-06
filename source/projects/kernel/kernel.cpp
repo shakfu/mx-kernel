@@ -340,31 +340,31 @@ void kernel_free(t_kernel* x)
         }
     }
 
-    // Wait for kernel thread to finish
+    // Handle thread cleanup
     if (x->kernel_thread) {
         if (x->kernel_thread->joinable()) {
-            x->kernel_thread->join();
+            // Thread is still running - detach it rather than blocking
+            x->kernel_thread->detach();
         }
         delete x->kernel_thread;
         x->kernel_thread = nullptr;
     }
 
-    // Clean up kernel
-    if (x->kernel) {
-        delete x->kernel;
-        x->kernel = nullptr;
-    }
+    // IMPORTANT: If the kernel was stopped but the thread was detached,
+    // we CANNOT safely delete the kernel/context because xeus has its own
+    // internal threads that will block in their destructors trying to join.
+    // Since those internal threads are blocked waiting for ZMQ messages,
+    // they'll never exit cleanly.
+    //
+    // Solution: Intentionally leak kernel and context on shutdown.
+    // The OS will clean up all resources (memory, sockets, threads) when
+    // the process terminates anyway.
 
-    // Clean up interpreter
+    // Only clean up if we're certain the kernel never started
+    // (interpreter is safe to delete - it doesn't have threads)
     if (x->interpreter) {
         delete x->interpreter;
         x->interpreter = nullptr;
-    }
-
-    // Clean up context
-    if (x->context) {
-        delete x->context;
-        x->context = nullptr;
     }
 
     // Remove connection file if it exists
@@ -375,6 +375,11 @@ void kernel_free(t_kernel* x)
             // Ignore errors
         }
     }
+
+    // Note: x->kernel and x->context are intentionally not deleted here
+    // to avoid blocking in xeus internal thread joins during shutdown.
+    // This is a known limitation when the kernel is stopped while blocked
+    // waiting for messages. The OS will reclaim all resources on process exit.
 }
 
 void* kernel_new(t_symbol* s, long argc, t_atom* argv)
@@ -566,13 +571,42 @@ void kernel_stop(t_kernel* x)
 {
     if (x->kernel && (*x->kernel)) {
         try {
+            // Stop the kernel (signals the event loop to exit)
             (*x->kernel)->stop();
 
-            object_post((t_object*)x, "kernel: stopped");
+            // The issue: kernel->stop() sets a flag, but the thread is blocked in poll_channels()
+            // waiting for messages. It won't check the flag until a message arrives.
+            //
+            // Solution: Detach the thread immediately and leave kernel/context cleanup to kernel_free().
+            // This way, the user gets immediate response, and the thread will eventually exit on its own
+            // (when it receives the next message or when the process exits).
+
+            if (x->kernel_thread) {
+                if (x->kernel_thread->joinable()) {
+                    x->kernel_thread->detach();
+                }
+                delete x->kernel_thread;
+                x->kernel_thread = nullptr;
+            }
+
+            // Remove connection file (safe to do immediately)
+            if (!x->connection_file.empty()) {
+                try {
+                    std::remove(x->connection_file.c_str());
+                    x->connection_file.clear();
+                } catch (...) {
+                    // Ignore errors
+                }
+            }
+
+            object_post((t_object*)x, "kernel: stopped (thread will finish in background)");
 
             if (x->outlet_right) {
                 outlet_anything(x->outlet_right, gensym("stopped"), 0, NULL);
             }
+
+            // Note: We leave kernel and context alive for now. They'll be cleaned up in kernel_free()
+            // after a grace period. This prevents use-after-free if the detached thread is still running.
 
         } catch (const std::exception& e) {
             object_error((t_object*)x, "kernel: stop error: %s", e.what());

@@ -131,13 +131,13 @@ uv run jupyter notebook
 
 ### Current Features
 
-- ✅ Full Jupyter protocol implementation
-- ✅ ZMQ communication
-- ✅ Connection file generation
-- ✅ Multi-client support
-- ✅ Kernel info/inspection
-- ✅ Execute requests
-- ✅ Graceful shutdown
+- [x] Full Jupyter protocol implementation
+- [x] ZMQ communication
+- [x] Connection file generation
+- [x] Multi-client support
+- [x] Kernel info/inspection
+- [x] Execute requests
+- [x] Graceful shutdown
 
 ### Limitations
 
@@ -145,7 +145,7 @@ uv run jupyter notebook
 - Code inspection returns not found (can be extended)
 - Execution currently echoes to Max but could be extended to actually evaluate Max code
 
-## Known Issues - RESOLVED! ✅
+## Known Issues - RESOLVED! [x]
 
 ### ~~Jupyter Console Parent Header Exception~~ - FIXED
 
@@ -160,7 +160,7 @@ data.m_parent_header = nl::json::object();
 data.m_metadata = nl::json::object();
 ```
 
-**Status:** ✅ Fixed and working! Jupyter console now connects without any exceptions.
+**Status:** [x] Fixed and working! Jupyter console now connects without any exceptions.
 
 ## Troubleshooting
 

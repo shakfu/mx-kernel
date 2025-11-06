@@ -57,15 +57,15 @@ The exact mechanism of how `{}` becomes `None` is unclear, but likely occurs in:
 
 ## Attempted Solutions
 
-### 1. ❌ Downgrading jupyter-console to 6.4.4
+### 1. [X] Downgrading jupyter-console to 6.4.4
 - **Result**: Different error - compatibility issue with jupyter_client 8.6.3
 - **Error**: `run_sync` expects coroutines but gets sync functions
 
-### 2. ❌ Modifying the kernel to always send non-empty parent_headers
+### 2. [X] Modifying the kernel to always send non-empty parent_headers
 - **Complexity**: Would require modifying xeus/xeus-zmq source code
 - **Not maintainable**: Would break with xeus updates
 
-### 3. ❌ Fixing jupyter-console 6.6.3
+### 3. [X] Fixing jupyter-console 6.6.3
 - **Issue**: Can't easily patch installed packages in uv environment
 - **Not sustainable**: Would need to maintain patches
 
@@ -74,11 +74,11 @@ The exact mechanism of how `{}` becomes `None` is unclear, but likely occurs in:
 **Use Jupyter Lab instead of Jupyter Console**
 
 Jupyter Lab:
-- ✅ No exceptions
-- ✅ Better UI
-- ✅ Full feature set
-- ✅ Properly handles all message types
-- ✅ More actively maintained
+- [x] No exceptions
+- [x] Better UI
+- [x] Full feature set
+- [x] Properly handles all message types
+- [x] More actively maintained
 
 ```bash
 uv run jupyter lab
@@ -113,7 +113,7 @@ However, this is **not recommended** because:
 - It adds unnecessary complexity
 - Jupyter Lab is the better solution
 
-## Resolution - FIXED! ✅
+## Resolution - FIXED! [x]
 
 ### The Root Cause
 

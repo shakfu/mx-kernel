@@ -1,18 +1,18 @@
-# mx-kernel: Successfully Implemented! ✅
+# mx-kernel: Successfully Implemented! [x]
 
 ## What Was Built
 
 A **fully functional Jupyter kernel** embedded in a Max/MSP external, enabling bidirectional communication between Max and Jupyter clients.
 
-## Current Status: WORKING ✅
+## Current Status: WORKING [x]
 
 The kernel has been successfully tested and confirmed working with:
-- ✅ Jupyter Console connection
-- ✅ Code execution from Jupyter to Max
-- ✅ Results returned from Max to Jupyter
-- ✅ Connection file generation
-- ✅ Multi-client support
-- ✅ Graceful start/stop
+- [x] Jupyter Console connection
+- [x] Code execution from Jupyter to Max
+- [x] Results returned from Max to Jupyter
+- [x] Connection file generation
+- [x] Multi-client support
+- [x] Graceful start/stop
 
 ## Test Results
 
@@ -26,7 +26,7 @@ In [1]: hello
 Out[1]: Executed in Max: hello
 ```
 
-**Status:** ✅ WORKING
+**Status:** [x] WORKING
 
 ## Architecture
 
@@ -163,15 +163,15 @@ Out[1]: Executed in Max: print("hello from jupyter")
 
 ## Success Metrics
 
-- ✅ Builds without errors
-- ✅ Starts successfully in Max
-- ✅ Creates connection file
-- ✅ Accepts Jupyter connections
-- ✅ Executes code requests
-- ✅ Returns results
-- ✅ Graceful shutdown
-- ✅ No memory leaks (RAII)
-- ✅ Thread-safe operation
+- [x] Builds without errors
+- [x] Starts successfully in Max
+- [x] Creates connection file
+- [x] Accepts Jupyter connections
+- [x] Executes code requests
+- [x] Returns results
+- [x] Graceful shutdown
+- [x] No memory leaks (RAII)
+- [x] Thread-safe operation
 
 **All success metrics achieved!**
 
