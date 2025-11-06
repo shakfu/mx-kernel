@@ -1,3 +1,9 @@
+.DS_Store
+
+.venv/
+build/
+externals/*
+
 # Prerequisites
 *.d
 
@@ -53,3 +59,10 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# ai agents
+.claude
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+
