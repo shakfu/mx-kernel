@@ -263,15 +263,7 @@ The `max_interpreter` class can be extended to:
 ```python
 # In Jupyter Console connected to Max kernel
 
-In [1]: # This executes in the Max kernel
-        print("Testing kernel")
-
-In [2]: # You can send any code
-        for i in range(5):
-            print(f"Count: {i}")
-
-In [3]: # Check kernel info
-        %who
+In [1]: hello world
 ```
 
 In Max, you'll see these messages appear in the console and route through the outlets.

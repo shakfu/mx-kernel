@@ -145,7 +145,7 @@ Out[1]: Executed in Max: print("hello from jupyter")
 ## Next Steps / Future Enhancements
 
 ### Easy Wins
-1. Add syntax highlighting for Max language in Jupyter
+1. Add syntax highlighting for Max `scripting language` in Jupyter
 2. Implement code completion for Max objects
 3. Add object inspection (help text)
 
