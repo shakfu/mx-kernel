@@ -28,12 +28,15 @@ include_directories(
 	"${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/json/include"
 )
 
-file(GLOB PROJECT_SRC
-     "*.h"
-	"*.c"
-     "*.cpp"
+set(PROJECT_SRC
+    external.cpp
+    connection.cpp
+    interpreter.cpp
+    connection.h
+    interpreter.h
+    message_queue.h
+    types.h
 )
-
 
 add_library(
 	${PROJECT_NAME}

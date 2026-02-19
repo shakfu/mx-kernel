@@ -5,6 +5,7 @@ project(${THIS_FOLDER_NAME})
 
 option(C74_BUILD_FAT "Build Universal Externals" OFF) # not supported (you're on your own! :-)
 option(ENABLE_LTO "enable link-time / interprocedural optimization" OFF)
+option(BUILD_TESTS "Build unit tests" OFF)
 
 # campatible with 3.5
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
@@ -88,3 +89,10 @@ foreach (cat_dir ${CATEGORY_DIRS})
     endif ()
   endforeach ()
 endforeach ()
+
+# Unit tests (no Max SDK dependency)
+if (BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(source/projects/kernel/tests)
+    add_test(NAME kernel_tests COMMAND kernel_tests)
+endif()

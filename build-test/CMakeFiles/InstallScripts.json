@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/sa/projects/personal/mx-kernel/build-test/cmake_install.cmake",
+		"/Users/sa/projects/personal/mx-kernel/build-test/source/projects/kernel/cmake_install.cmake",
+		"/Users/sa/projects/personal/mx-kernel/build-test/source/projects/kernel/thirdparty/xeus/cmake_install.cmake",
+		"/Users/sa/projects/personal/mx-kernel/build-test/source/projects/kernel/thirdparty/xeus-zmq/cmake_install.cmake",
+		"/Users/sa/projects/personal/mx-kernel/build-test/source/projects/kernel/tests/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

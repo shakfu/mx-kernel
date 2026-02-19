@@ -4,7 +4,7 @@ PROJECTS := $(SRCDIR)/projects
 PKG_NAME = mx-kernel
 MAX_VERSIONS := 8 9
 
-.phony: all build clean setup update-submodules link connect
+.phony: all build clean setup update-submodules link connect test install-kernelspec
 
 all: build
 
@@ -24,8 +24,20 @@ update-submodules:
 	$(call section,"updating git submodules")
 	@git submodule init && git submodule update
 
+test:
+	@mkdir -p build-test && cd build-test && \
+		cmake .. -DBUILD_TESTS=ON && \
+		cmake --build . --target kernel_tests --config Release && \
+		./source/projects/kernel/tests/kernel_tests
+
 connect:
 	@uv run jupyter console --existing $(HOME)/.local/share/jupyter/runtime/kernel-testkernel.json
+
+install-kernelspec:
+	@mkdir -p $(HOME)/.local/share/jupyter/kernels/mx-kernel
+	@printf '{"argv":["echo","Connect via Max"],"display_name":"Max/MSP","language":"max"}' \
+		> $(HOME)/.local/share/jupyter/kernels/mx-kernel/kernel.json
+	@echo "Kernelspec installed at $(HOME)/.local/share/jupyter/kernels/mx-kernel/kernel.json"
 
 link:
 	$(call section,"symlink to Max 'Packages' Directories")

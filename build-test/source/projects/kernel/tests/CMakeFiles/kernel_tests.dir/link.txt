@@ -1,0 +1,1 @@
+/usr/bin/c++  -arch arm64 -mmacosx-version-min=10.11 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/kernel_tests.dir/test_main.cpp.o CMakeFiles/kernel_tests.dir/test_connection.cpp.o CMakeFiles/kernel_tests.dir/test_message_queue.cpp.o CMakeFiles/kernel_tests.dir/__/connection.cpp.o -o kernel_tests
