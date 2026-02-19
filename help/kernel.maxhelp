@@ -18,7 +18,7 @@
                     "numinlets": 2,
                     "numoutlets": 2,
                     "outlettype": [ "", "" ],
-                    "patching_rect": [ 108.0, 233.0, 81.0, 22.0 ],
+                    "patching_rect": [ 198.0, 308.0, 81.0, 22.0 ],
                     "text": "route execute"
                 }
             },
@@ -29,7 +29,7 @@
                     "numinlets": 1,
                     "numoutlets": 1,
                     "outlettype": [ "" ],
-                    "patching_rect": [ 108.0, 265.0, 85.0, 22.0 ],
+                    "patching_rect": [ 198.0, 340.0, 85.0, 22.0 ],
                     "text": "prepend result"
                 }
             },
@@ -40,40 +40,8 @@
                     "numinlets": 2,
                     "numoutlets": 2,
                     "outlettype": [ "", "" ],
-                    "patching_rect": [ 108.0, 200.0, 65.0, 22.0 ],
+                    "patching_rect": [ 198.0, 275.0, 65.0, 22.0 ],
                     "text": "route code"
-                }
-            },
-            {
-                "box": {
-                    "id": "obj-11",
-                    "maxclass": "newobj",
-                    "numinlets": 1,
-                    "numoutlets": 1,
-                    "outlettype": [ "bang" ],
-                    "patching_rect": [ 67.0, 341.0, 58.0, 22.0 ],
-                    "text": "loadbang"
-                }
-            },
-            {
-                "box": {
-                    "id": "obj-10",
-                    "maxclass": "message",
-                    "numinlets": 2,
-                    "numoutlets": 1,
-                    "outlettype": [ "" ],
-                    "patching_rect": [ 67.0, 368.0, 29.5, 22.0 ],
-                    "text": "set"
-                }
-            },
-            {
-                "box": {
-                    "id": "obj-9",
-                    "maxclass": "message",
-                    "numinlets": 2,
-                    "numoutlets": 1,
-                    "outlettype": [ "" ],
-                    "patching_rect": [ 67.0, 396.0, 150.0, 22.0 ]
                 }
             },
             {
@@ -114,7 +82,7 @@
                     "maxclass": "newobj",
                     "numinlets": 1,
                     "numoutlets": 0,
-                    "patching_rect": [ 198.0, 341.0, 127.0, 22.0 ],
+                    "patching_rect": [ 220.0, 234.0, 127.0, 22.0 ],
                     "text": "print output @popup 1"
                 }
             },
@@ -145,15 +113,15 @@
             {
                 "patchline": {
                     "destination": [ "obj-14", 0 ],
-                    "midpoints": [ 207.5, 190.5, 117.5, 190.5 ],
-                    "order": 2,
+                    "midpoints": [ 207.5, 190.5, 207.5, 190.5 ],
+                    "order": 1,
                     "source": [ "obj-1", 0 ]
                 }
             },
             {
                 "patchline": {
                     "destination": [ "obj-4", 0 ],
-                    "order": 1,
+                    "order": 0,
                     "source": [ "obj-1", 0 ]
                 }
             },
@@ -165,25 +133,6 @@
             },
             {
                 "patchline": {
-                    "destination": [ "obj-9", 1 ],
-                    "order": 0,
-                    "source": [ "obj-1", 0 ]
-                }
-            },
-            {
-                "patchline": {
-                    "destination": [ "obj-9", 0 ],
-                    "source": [ "obj-10", 0 ]
-                }
-            },
-            {
-                "patchline": {
-                    "destination": [ "obj-10", 0 ],
-                    "source": [ "obj-11", 0 ]
-                }
-            },
-            {
-                "patchline": {
                     "destination": [ "obj-2", 0 ],
                     "source": [ "obj-14", 0 ]
                 }
@@ -191,7 +140,7 @@
             {
                 "patchline": {
                     "destination": [ "obj-1", 0 ],
-                    "midpoints": [ 117.5, 311.6953125, 82.9921875, 311.6953125, 82.9921875, 149.0, 207.5, 149.0 ],
+                    "midpoints": [ 207.5, 388.2109375, 82.9921875, 388.2109375, 82.9921875, 149.0, 207.5, 149.0 ],
                     "source": [ "obj-15", 0 ]
                 }
             },
