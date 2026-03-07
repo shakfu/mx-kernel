@@ -3,6 +3,7 @@
 .venv/
 build/
 externals/*
+build-test/
 
 # Prerequisites
 *.d
