@@ -422,6 +422,20 @@ TEST_CASE("shutdown_request does not permanently disarm the interpreter") {
     CHECK(reply["ename"] == "MaxTimeout"); // waited, rather than skipping
 }
 
+TEST_CASE("a locally initiated stop does not report a client shutdown") {
+    harness h;
+
+    // This is what kernel_shutdown does before calling xkernel::stop(), which
+    // in turn calls shutdown_request() on the interpreter.
+    h.impl.shutdown_requested.store(true);
+    h.interp.shutdown_request();
+
+    // The patch asked for this stop; telling it "shutdown" would imply a
+    // client did.
+    CHECK(h.impl.outlet_queue.empty());
+    CHECK(h.impl.shutdown_requested.load());
+}
+
 TEST_CASE("silent cells publish nothing") {
     harness h;
     h.impl.timeout.store(0);

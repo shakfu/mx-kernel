@@ -29,6 +29,15 @@
 > join and destruction all complete; reverting the poll to `-1` makes those
 > tests hang, which their watchdog reports as a failure.
 >
+> **Verified in Max on 2026-08-18** (Max 9, arm64), not only by the test suite:
+> start and port binding; connection file written `0600`; connecting with
+> `jupyter console` without the `parent_header` exception; the round trip
+> (`Out[n]` matching its input across consecutive cells); `execute_input`
+> published once; streaming followed by a result; `MaxTimeout` reported as an
+> error; the `stop` -> `start` restart cycle with a clean join (`kernel: stopped`,
+> no fallback warning); and object deletion followed by quitting Max with no
+> hang. That last one is the force-quit bug the shutdown investigation was about.
+>
 > Additional defects found while fixing the above, none of which were in the
 > original review:
 >
@@ -42,8 +51,12 @@
 >   collided with them. Found by manual testing in Max, not by the suite.
 > - Every `object_post`/`object_warn`/`object_error` double-prefixed its message
 >   (`kernel: kernel: ...`), since Max already prefixes the object name.
+> - The `shutdown` status was emitted on a locally initiated `stop` as well as a
+>   client request, because `xkernel::stop()` calls `shutdown_request()` itself.
 >
-> All fixed.
+> All fixed. The last three were found by running the object in Max, not by the
+> suite -- which is what should be expected of `external.cpp`, the one
+> translation unit the tests cannot reach.
 
 **Date:** 2026-08-17
 **Reviewed at:** `ed57795` (clean tree)

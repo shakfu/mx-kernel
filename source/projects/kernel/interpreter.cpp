@@ -240,9 +240,18 @@ nl::json max_interpreter::kernel_info_request_impl() {
 void max_interpreter::shutdown_request_impl() {
     // Only flag the request. Clearing `alive` here would leave the object
     // permanently unable to execute, since nothing ever set it back.
-    m_impl->shutdown_requested.store(true);
+    //
+    // xkernel::stop() calls this as well, so a stop initiated from Max also
+    // arrives here. The external sets the flag before calling stop(), so a
+    // previous value of true means this is our own shutdown rather than a
+    // client's -- and the patch does not need telling about a stop it asked
+    // for itself.
+    const bool already_stopping = m_impl->shutdown_requested.exchange(true);
+    if (already_stopping) {
+        return;
+    }
 
-    // Let the patch know the client asked to shut down.
+    // Let the patch know a client asked to shut down.
     OutletMessage msg;
     msg.selector = "shutdown";
     msg.outlet_index = 1; // right outlet (status)

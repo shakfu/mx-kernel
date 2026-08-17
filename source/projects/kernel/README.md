@@ -65,7 +65,7 @@ is detail.
 |---------|------|
 | `started connection_file <path>` | `start` succeeded. |
 | `stopped` | `stop` succeeded. |
-| `shutdown` | A Jupyter client requested shutdown. |
+| `shutdown` | A Jupyter client requested shutdown. Not emitted for a `stop` sent from the patch, which reaches the same code path inside xeus. |
 | `kernel info <json>` | Reply to `info`. |
 | `installed <path>` | Reply to `install`. |
 | `eval <args...>` | Echo of an `eval` message. |
