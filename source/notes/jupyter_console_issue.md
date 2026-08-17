@@ -1,5 +1,11 @@
 # Jupyter Console Parent Header Issue - Investigation Summary
 
+> **Historical record.** Written 2025-11-06, during the investigation it describes.
+> Kept because the reasoning and the rejected alternatives are worth having;
+> it is not a description of the current code. Code references below point at
+> files as they were named at the time. For how the object behaves now, see
+> [the object README](../projects/kernel/README.md).
+
 ## The Problem
 
 When connecting to our Max kernel with `jupyter console --existing`, users see an exception:

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <optional>
@@ -21,6 +23,11 @@ struct OutletMessage {
 };
 
 // Result flowing back from Max to the kernel thread.
+//
+// execution_counter is stamped by the external at push time with the cell that
+// was waiting when the message arrived (0 means "no cell was waiting"). The
+// interpreter discards any result whose counter does not match its own, which
+// keeps a late or duplicated reply from being attributed to the wrong cell.
 struct ResultMessage {
     std::string text;
     std::string error_name;  // non-empty => error
@@ -30,20 +37,41 @@ struct ResultMessage {
     int execution_counter = 0;
 
     bool is_error() const { return !error_name.empty(); }
+
+    // A stream message is intermediate output: it does not complete a cell.
+    bool is_stream() const { return !stream_name.empty(); }
 };
 
-// Minimal thread-safe FIFO queue. Mutex + deque -- correct and simple for
-// human-typing-speed message rates.
+// Minimal thread-safe FIFO queue. Mutex + deque + condition variable, so a
+// consumer can block until an item arrives instead of polling.
 template <typename T>
 class ThreadSafeQueue {
 public:
     void push(T item) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_queue.push_back(std::move(item));
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_queue.push_back(std::move(item));
+        }
+        m_cv.notify_one();
     }
 
     std::optional<T> try_pop() {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_queue.empty()) {
+            return std::nullopt;
+        }
+        T item = std::move(m_queue.front());
+        m_queue.pop_front();
+        return item;
+    }
+
+    // Block until an item is available or the timeout elapses. Returns
+    // std::nullopt on timeout. A zero or negative timeout degrades to try_pop.
+    std::optional<T> wait_pop(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        if (timeout.count() > 0) {
+            m_cv.wait_for(lock, timeout, [this] { return !m_queue.empty(); });
+        }
         if (m_queue.empty()) {
             return std::nullopt;
         }
@@ -69,6 +97,7 @@ public:
 
 private:
     mutable std::mutex m_mutex;
+    std::condition_variable m_cv;
     std::deque<T> m_queue;
 };
 

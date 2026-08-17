@@ -25,9 +25,17 @@ namespace xeus
 
         publish(std::move(msg), channel::SHELL);
 
+        // LOCAL PATCH (mx-kernel) -- poll with a timeout instead of blocking
+        // forever. See patches/README.md.
+        //
+        // With poll_channels(-1) this loop parks until a message arrives, so
+        // after stop() it never re-tests is_stopped(), never reaches
+        // stop_channels() below, and the destructor then blocks forever
+        // joining the publisher and heartbeat threads. Polling lets the loop
+        // exit, and gives an embedder a hook to run work on this thread.
         while(!is_stopped())
         {
-            auto msg = poll_channels(-1);
+            auto msg = poll_channels(get_poll_timeout());
             if (msg)
             {
                 if (msg.value().second == channel::SHELL)
@@ -38,6 +46,10 @@ namespace xeus
                 {
                     notify_control_listener(std::move(msg.value().first));
                 }
+            }
+            else
+            {
+                notify_idle();
             }
         }
 

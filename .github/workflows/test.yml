@@ -1,0 +1,63 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: unit tests (macOS)
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install zeromq openssl@3 cppzmq nlohmann-json
+
+      - name: Check vendored patches are applied
+        run: ./patches/apply.sh
+
+      - name: Build and run unit tests
+        run: make test
+
+  build-external:
+    name: build external (macOS)
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install zeromq openssl@3 cppzmq nlohmann-json
+
+      - name: Build
+        run: make build
+
+      - name: Verify the external is self-contained
+        # The external must not reference Homebrew by absolute path: such a
+        # build only loads on a machine with the same Homebrew prefix.
+        run: |
+          BIN=externals/kernel.mxo/Contents/MacOS/kernel
+          test -f "$BIN" || { echo "external was not built"; exit 1; }
+          otool -L "$BIN"
+          if otool -L "$BIN" | grep -E '^\s+(/opt/homebrew|/usr/local)'; then
+            echo "::error::external links Homebrew paths directly; bundling failed"
+            exit 1
+          fi
+          for lib in libzmq.5.dylib libcrypto.3.dylib; do
+            test -f "externals/kernel.mxo/Contents/Frameworks/$lib" || {
+              echo "::error::$lib was not bundled"; exit 1; }
+          done
+          echo "external is self-contained"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel.mxo
+          path: externals/kernel.mxo

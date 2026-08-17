@@ -1,0 +1,40 @@
+From: mx-kernel
+Subject: [PATCH] Declare a cmake_minimum_required policy range
+
+CMake 3.31+ warns that compatibility with cmake_minimum_required below 3.10
+is deprecated and will be removed:
+
+    CMake Warning (deprecated) at CMakeLists.txt:10 (cmake_minimum_required):
+      Compatibility with CMake < 3.10 will be removed from a future version
+      of CMake.
+
+      Update the VERSION argument <min> value.  Or, use the <min>...<max>
+      syntax to tell CMake that the project requires at least <min> but has
+      been updated to work with policies introduced by <max> or earlier.
+
+Under CMake 4.x this is not merely noise: the bare <min> form is on a path to
+being removed outright, at which point the vendored tree stops configuring.
+
+Take the second option the warning offers. The <min>...<max> range keeps the
+declared floor at 3.8 -- so the project still builds with older CMake -- while
+telling CMake the sources have been checked against policies up to 3.31. The
+bundled nlohmann/json already uses this form (VERSION 3.5...4.0), which is why
+it never produced the warning.
+
+Verified with CMake 4.4.2: unit tests pass and the external builds, links and
+signs unchanged.
+
+Applies to: xeus 5.2.4
+Upstream: not yet reported -- see patches/README.md
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -7,7 +7,7 @@
+ # The full license is in the file LICENSE, distributed with this software. #
+ ############################################################################
+ 
+-cmake_minimum_required(VERSION 3.8)
++cmake_minimum_required(VERSION 3.8...3.31)
+ project(xeus)
+ 
+ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake;${CMAKE_MODULE_PATH}")

@@ -1,5 +1,11 @@
 # Kernel Shutdown Compromise
 
+> **Historical record.** Written 2025-11-07, during the investigation it describes.
+> Kept because the reasoning and the rejected alternatives are worth having;
+> it is not a description of the current code. Code references below point at
+> files as they were named at the time. For how the object behaves now, see
+> [the object README](../projects/kernel/README.md).
+
 ## The Problem
 
 When stopping the Max/MSP Jupyter kernel and subsequently shutting down Max, the application would hang and require force quitting.
@@ -62,7 +68,9 @@ kernel_free(_kernel*)
 
 ### Implementation
 
-In `source/projects/kernel/kernel.cpp`:
+In `source/projects/kernel/kernel.cpp` (that file has since been split into
+`external.cpp`, `interpreter.cpp`, and `connection.cpp`; the code below is the
+2025-11 version and is kept for the reasoning, not as current source):
 
 ```cpp
 void kernel_stop(t_kernel* x)
@@ -166,32 +174,44 @@ Have a Jupyter client send a proper shutdown_request message.
 ## Documentation
 
 This compromise is documented in:
-- This file: `SHUTDOWN_COMPROMISE.md`
-- Code comments in `kernel.cpp` at `kernel_free()`
-- Code comments in `kernel.cpp` at `kernel_stop()`
+- This file
+- Code comments in `external.cpp` at `kernel_free()` and `kernel_stop()`
+- The "Shutdown" section of the object README
 
-## Verification
+## Correction (2026-08-18)
 
-To verify the fix works:
+The compromise as described here was incomplete, and has since been retired.
 
-1. Start Max/MSP
-2. Create a `[kernel @name test @debug 1]` object
-3. Send `start` message
-4. Send `stop` message → should return immediately with "kernel: stopped (thread will finish in background)"
-5. Quit Max → should exit cleanly without hanging
+**First, it was unsafe as written.** Leaking the kernel and context is right as
+far as it goes, but the leaked kernel *owns* the interpreter, and the
+interpreter holds a raw pointer to the object's C++ state. That state was still
+being freed in `kernel_free`, and the `qelem` with it, while the detached kernel
+thread was still running. A client sending a request during or after teardown
+would write into freed memory and signal a freed `qelem`. The immediate fix was
+to make the leak consistent -- leak the impl along with the kernel, and clear
+the notifier under a mutex before freeing the `qelem`.
 
-## Future Improvements
+**Second, the root cause has now been fixed.** "Alternative Approaches" below
+dismissed patching xeus-zmq to use a timed poll as requiring an unmaintainable
+fork. That judgement no longer holds: the project already carries local patches
+against the vendored tree with a documented, idempotent apply mechanism
+(`patches/`), so one more is cheap.
 
-If xeus-zmq is updated to support:
-- Timed polling with periodic flag checks
-- External control messages to wake up blocked threads
-- Async shutdown without join
+`patches/xeus-zmq-0003-timed-poll-and-idle-callback.patch` changes
+`poll_channels(-1)` to poll with a timeout. The loop then observes
+`is_stopped()` within its poll interval, reaches `stop_channels()`, and the
+publisher and heartbeat threads exit -- so the join that hangs in the stack
+trace above simply completes. The patch also makes `m_request_stop` atomic,
+which matters once the loop reads it every tick rather than never.
 
-Then we could implement proper cleanup without the leak. Until then, this compromise provides the best user experience.
+With that in place the external joins its thread and destroys the kernel
+normally. **There is no longer any intentional leak.** A 2 second deadline on
+the join remains as a safeguard: if it expires the object falls back to
+detaching and leaking, exactly as described in this note, and warns in the Max
+console. That path should now only be reachable if the patch is missing.
 
-## References
-
-- Issue discovered: 2025-01-07
-- xeus version: 5.2.4
-- xeus-zmq version: 3.1.1
-- Jupyter protocol: 5.3
+The behaviour is pinned by `source/projects/kernel/tests/test_server_shutdown.cpp`,
+which starts a real kernel on loopback and asserts that stop, join and
+destruction all complete. Reverting the poll to `-1` makes those tests hang,
+which their watchdog reports as a hard failure -- so the regression cannot
+return unnoticed.

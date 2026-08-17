@@ -1,0 +1,51 @@
+From: mx-kernel
+Subject: [PATCH] iopub_welcome: send {} rather than null for parent_header/metadata
+
+xpublisher::create_xpub_message builds an xmessage_base_data without
+initialising m_parent_header or m_metadata. nl::json default-constructs to
+null, so the iopub_welcome message published at startup goes onto the wire
+with:
+
+    parent_header: null
+    metadata: null
+
+The Jupyter messaging specification requires an empty object when a message
+has no parent:
+
+    https://jupyter-client.readthedocs.io/en/latest/messaging.html#parent-header
+    "If there is no parent, an empty dict should be used."
+
+Clients that follow the spec and call .get() on parent_header therefore fail
+against any xeus-zmq kernel. jupyter-console 6.6.3 raises
+
+    Exception 'NoneType' object has no attribute 'get'
+
+from ptshell.py:825 as soon as it connects. JupyterLab tolerates it, which is
+why the problem looks client-specific at first.
+
+Initialising both fields to nl::json::object() fixes it at the source.
+
+Applies to: xeus-zmq 3.1.1
+Upstream: not yet reported -- see patches/README.md
+
+--- a/src/server/xpublisher.cpp
++++ b/src/server/xpublisher.cpp
+@@ -41,6 +41,18 @@
+     {
+         xmessage_base_data data;
+         data.m_header = xeus::make_header("iopub_welcome", "", "");
++        // LOCAL PATCH (mx-kernel) -- see patches/README.md and
++        // patches/xeus-zmq-0001-iopub-welcome-parent-header.patch
++        //
++        // nl::json default-constructs to null, not {}. Serialising null here
++        // puts `null` on the wire for parent_header, and the Jupyter messaging
++        // spec requires an empty object when a message has no parent. Clients
++        // that call .get() on it (jupyter-console does) then raise
++        // "'NoneType' object has no attribute 'get'" on connect.
++        //
++        // Do not drop these two lines when refreshing the vendored xeus-zmq.
++        data.m_parent_header = nl::json::object();
++        data.m_metadata = nl::json::object();
+         data.m_content["subscription"] = topic;
+         xpub_message p_msg("", std::move(data));
+ 

@@ -10,6 +10,7 @@
 #ifndef XEUS_SERVER_ZMQ_IMPL_HPP
 #define XEUS_SERVER_ZMQ_IMPL_HPP
 
+#include <atomic>
 #include <memory>
 
 #include "zmq.hpp"
@@ -85,7 +86,12 @@ namespace xeus
 
         nl::json::error_handler_t m_error_handler;
 
-        bool m_request_stop;
+        // LOCAL PATCH (mx-kernel) -- atomic, not plain bool.
+        // The server loop polls with a timeout and reads this every tick,
+        // while stop() writes it from another thread. As a plain bool that is
+        // a data race, and the compiler is free to hoist the read out of the
+        // loop, so a stop request could be missed entirely.
+        std::atomic<bool> m_request_stop;
     };
 }
 

@@ -41,8 +41,18 @@ namespace xeus
     {
         xmessage_base_data data;
         data.m_header = xeus::make_header("iopub_welcome", "", "");
-        data.m_parent_header = nl::json::object();  // Fix: ensure parent_header is {} not null
-        data.m_metadata = nl::json::object();       // Fix: ensure metadata is {} not null
+        // LOCAL PATCH (mx-kernel) -- see patches/README.md and
+        // patches/xeus-zmq-0001-iopub-welcome-parent-header.patch
+        //
+        // nl::json default-constructs to null, not {}. Serialising null here
+        // puts `null` on the wire for parent_header, and the Jupyter messaging
+        // spec requires an empty object when a message has no parent. Clients
+        // that call .get() on it (jupyter-console does) then raise
+        // "'NoneType' object has no attribute 'get'" on connect.
+        //
+        // Do not drop these two lines when refreshing the vendored xeus-zmq.
+        data.m_parent_header = nl::json::object();
+        data.m_metadata = nl::json::object();
         data.m_content["subscription"] = topic;
         xpub_message p_msg("", std::move(data));
 

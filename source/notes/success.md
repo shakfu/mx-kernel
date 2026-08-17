@@ -1,5 +1,11 @@
 # mx-kernel: Successfully Implemented! [x]
 
+> **Historical record.** Written 2025-11-07, during the investigation it describes.
+> Kept because the reasoning and the rejected alternatives are worth having;
+> it is not a description of the current code. Code references below point at
+> files as they were named at the time. For how the object behaves now, see
+> [the object README](../projects/kernel/README.md).
+
 ## What Was Built
 
 A **fully functional Jupyter kernel** embedded in a Max/MSP external, enabling bidirectional communication between Max and Jupyter clients.
@@ -104,7 +110,9 @@ Out[1]: Executed in Max: print("hello from jupyter")
 - Binary size: 2.2 MB
 - Startup time: < 100ms
 - Thread-safe: Yes
-- Memory management: RAII with unique_ptr
+- Memory management: RAII with unique_ptr. (A deliberate teardown leak was
+  added shortly after this was written and retired again in 2026-08 -- see the
+  correction in `shutdown_compromise.md`.)
 - Platform: macOS arm64 (extendable to x86_64 and Windows)
 
 ## Files Modified/Created
@@ -113,10 +121,13 @@ Out[1]: Executed in Max: print("hello from jupyter")
 - `source/projects/kernel/kernel.cpp` - Main implementation (+350 lines)
 - `source/projects/kernel/CMakeLists.txt` - Build configuration
 
+> Since split into `external.cpp`, `interpreter.cpp`, `connection.cpp`,
+> `types.cpp` and their headers.
+
 ### Documentation
-- `TESTING.md` - Complete testing guide
-- `SUCCESS.md` - This file
-- `CLAUDE.md` - Updated with Jupyter functionality
+- `TESTING.md` - Complete testing guide (now `source/notes/testing.md`)
+- `SUCCESS.md` - This file (now `source/notes/success.md`)
+- `CLAUDE.md` - Updated with Jupyter functionality (no longer in the repo)
 
 ### Built Artifacts
 - `externals/kernel.mxo` - Max external (2.2 MB)
@@ -136,11 +147,12 @@ Out[1]: Executed in Max: print("hello from jupyter")
 
 ## Known Issues
 
-### Minor: Jupyter Console Exception
+### ~~Minor: Jupyter Console Exception~~ -- RESOLVED
 - **Issue:** `'NoneType' object has no attribute 'get'` exception in jupyter-console
-- **Impact:** None - kernel works perfectly
-- **Cause:** jupyter-console message filtering quirk
-- **Workaround:** Use Jupyter Lab or ignore exception
+- **Cause:** xeus-zmq sent JSON `null` rather than `{}` for `parent_header`
+  on the startup `iopub_welcome` message -- not a jupyter-console bug
+- **Fix:** patched in xeus-zmq; see `jupyter_console_issue.md` and
+  `patches/README.md`
 
 ## Next Steps / Future Enhancements
 
@@ -170,7 +182,8 @@ Out[1]: Executed in Max: print("hello from jupyter")
 - [x] Executes code requests
 - [x] Returns results
 - [x] Graceful shutdown
-- [x] No memory leaks (RAII)
+- [x] No memory leaks (RAII). A deliberate teardown leak existed between
+      2025-11 and 2026-08; see the correction in `shutdown_compromise.md`
 - [x] Thread-safe operation
 
 **All success metrics achieved!**
@@ -188,4 +201,5 @@ Out[1]: Executed in Max: print("hello from jupyter")
 Follows component licenses:
 - xeus: BSD-3-Clause
 - Max SDK: Cycling '74 license
-- Project code: [Specify your license]
+- Project code: GPL-3.0 (see `LICENSE`; note the Max SDK compatibility caveat
+  in the root README)

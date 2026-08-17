@@ -31,6 +31,30 @@ namespace xeus
     // API for inheriting classes //
     ////////////////////////////////
 
+    // LOCAL PATCH (mx-kernel) -- see patches/README.md
+    void xserver_zmq::set_idle_callback(idle_callback_type cb)
+    {
+        m_idle_callback = std::move(cb);
+    }
+
+    void xserver_zmq::set_poll_timeout(long timeout_ms)
+    {
+        m_poll_timeout = timeout_ms;
+    }
+
+    long xserver_zmq::get_poll_timeout() const
+    {
+        return m_poll_timeout;
+    }
+
+    void xserver_zmq::notify_idle()
+    {
+        if (m_idle_callback)
+        {
+            m_idle_callback();
+        }
+    }
+
     void xserver_zmq::start_publisher_thread()
     {
         p_impl->start_publisher_thread();

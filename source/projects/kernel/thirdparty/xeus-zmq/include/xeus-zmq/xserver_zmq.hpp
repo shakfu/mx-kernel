@@ -10,6 +10,7 @@
 #ifndef XEUS_SERVER_ZMQ_HPP
 #define XEUS_SERVER_ZMQ_HPP
 
+#include <functional>
 #include <optional>
 
 #include "xeus/xeus_context.hpp"
@@ -30,7 +31,30 @@ namespace xeus
 
         using xserver::notify_internal_listener;
 
+        // LOCAL PATCH (mx-kernel) -- idle callback and configurable poll
+        // timeout. See patches/README.md.
+        //
+        // An embedded kernel needs two things the blocking poll cannot give:
+        // a chance to notice that stop() was requested, and a chance to do
+        // work on the thread that owns the ZMQ sockets (publishing on IOPub
+        // from any other thread is a data race). Polling with a timeout and
+        // invoking a callback on each idle tick provides both.
+        //
+        // Both setters must be called before start(); they are not
+        // synchronised, and the server thread reads them once it is running.
+        using idle_callback_type = std::function<void()>;
+        void set_idle_callback(idle_callback_type cb);
+
+        // Poll timeout in milliseconds. A negative value blocks indefinitely,
+        // which restores the historical behaviour but means stop() is not
+        // observed until the next message arrives.
+        void set_poll_timeout(long timeout_ms);
+        long get_poll_timeout() const;
+
     protected:
+
+        // Invoked by inheriting classes when a poll times out with no message.
+        void notify_idle();
 
         xserver_zmq(xcontext& context,
                     const xconfiguration& config,
@@ -64,6 +88,10 @@ namespace xeus
         void update_config_impl(xconfiguration& config) const override;
 
         std::unique_ptr<xserver_zmq_impl> p_impl;
+
+        // LOCAL PATCH (mx-kernel)
+        idle_callback_type m_idle_callback;
+        long m_poll_timeout = 100;
     };
 
     XEUS_ZMQ_API

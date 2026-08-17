@@ -4,18 +4,36 @@ PROJECTS := $(SRCDIR)/projects
 PKG_NAME = mx-kernel
 MAX_VERSIONS := 8 9
 
-.phony: all build clean setup update-submodules link connect test install-kernelspec
+# Kernel instance name used by the `connect` target. Override on the command
+# line to match the @name attribute of your object: make connect NAME=mine
+NAME ?= testkernel
+
+RUNTIME_DIR ?= $(HOME)/.local/share/jupyter/runtime
+
+define section
+	@echo ""
+	@echo "-------------------------------------------------------------------"
+	@echo ">>> $(1)"
+	@echo "-------------------------------------------------------------------"
+endef
+
+.PHONY: all build rebuild clean setup update-submodules link connect test \
+        install-kernelspec patch-thirdparty
 
 all: build
 
-
-build: clean
+# Incremental by default. Use `make rebuild` for a clean build.
+build:
+	$(call section,"building externals")
 	@mkdir -p build && cd build && \
 		cmake .. && \
 		cmake --build . --config Release
 
+rebuild: clean build
+
 clean:
-	@rm -rf exterals build
+	$(call section,"cleaning build output")
+	@rm -rf externals build build-test
 
 setup: update-submodules link
 	$(call section,"setup complete")
@@ -24,20 +42,35 @@ update-submodules:
 	$(call section,"updating git submodules")
 	@git submodule init && git submodule update
 
+# Re-apply the local patches carried against the vendored dependencies.
+# See patches/README.md -- the build does not depend on this, but refreshing
+# a vendored library does.
+patch-thirdparty:
+	$(call section,"applying thirdparty patches")
+	@./patches/apply.sh
+
 test:
+	$(call section,"building and running unit tests")
 	@mkdir -p build-test && cd build-test && \
 		cmake .. -DBUILD_TESTS=ON && \
 		cmake --build . --target kernel_tests --config Release && \
 		./source/projects/kernel/tests/kernel_tests
 
 connect:
-	@uv run jupyter console --existing $(HOME)/.local/share/jupyter/runtime/kernel-testkernel.json
+	@test -f "$(RUNTIME_DIR)/kernel-$(NAME).json" || \
+		{ echo "No connection file for '$(NAME)'."; \
+		  echo "Start a [kernel @name $(NAME)] object in Max first,"; \
+		  echo "or pass the right name: make connect NAME=<your-kernel-name>"; \
+		  exit 1; }
+	@uv run jupyter console --existing $(RUNTIME_DIR)/kernel-$(NAME).json
 
 install-kernelspec:
 	@mkdir -p $(HOME)/.local/share/jupyter/kernels/mx-kernel
-	@printf '{"argv":["echo","Connect via Max"],"display_name":"Max/MSP","language":"max"}' \
+	@printf '{"argv":["echo","Start the kernel from a Max patch, then connect with --existing"],"display_name":"Max/MSP (connect to a running patch)","language":"max"}' \
 		> $(HOME)/.local/share/jupyter/kernels/mx-kernel/kernel.json
 	@echo "Kernelspec installed at $(HOME)/.local/share/jupyter/kernels/mx-kernel/kernel.json"
+	@echo "Note: this only makes the kernel discoverable by name. It cannot launch"
+	@echo "a kernel -- start one from a Max patch and connect with --existing."
 
 link:
 	$(call section,"symlink to Max 'Packages' Directories")

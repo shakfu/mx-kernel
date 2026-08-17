@@ -1,488 +1,303 @@
-# mx-kernel: Comprehensive Project Review
+# mx-kernel: Project Review
 
-**Date:** 2026-02-19
-**Scope:** Code quality, architecture, features, usability, and future directions
+> **Status: addressed 2026-08-18.** Every item in the suggested order of work
+> (Section 8) has been acted on. The findings below describe the code at
+> `ed57795` and are kept as the record of why the changes were made -- they are
+> no longer a description of the current tree.
+>
+> | # | Item | Status |
+> |---|------|--------|
+> | 1 | Teardown use-after-free | Fixed. Initially by leaking the impl with the kernel; now properly -- the server thread is joined and everything destroyed, with the notifier cleared under a mutex before the qelem is freed. |
+> | 2 | `make clean` typo | Fixed, along with `.PHONY`, the undefined `section` macro, incremental `build`, and `connect NAME=`. |
+> | 3 | Undistributable binary | Fixed. `script/bundle_dylibs.sh` bundles libzmq, libcrypto and libsodium into the bundle at `@rpath` and re-signs. Verified: no absolute Homebrew paths remain. |
+> | 4 | One-shot lifecycle | Fixed. `eval` guard removed, kernel released on `stop`, interpreter constructed per `start`, shutdown no longer latches `alive` off. |
+> | 5 | Uncorrelated results | Fixed. Stale replies are drained per cell and stamped with the executing cell's counter; mismatches are discarded. |
+> | 6 | World-readable connection file | Fixed. Created `0600` via `open(2)` up front, so the key is never briefly world-readable. |
+> | 7 | Stale documentation | Rewritten: object README, root README, dated notes, `how-to-test.md` folded in. |
+> | 8 | Untested interpreter | Fixed. `qelem_set` replaced by an injected notifier; `interpreter.cpp` is now under test, plus real-kernel shutdown integration tests. 6 tests/109 assertions -> 37/231. |
+> | 9 | Unmarked vendored patch | Fixed. Marked in-tree, extracted to `patches/`, with an idempotent `apply.sh`. Not yet reported upstream. |
+> | 10 | No CI | Added `.github/workflows/test.yml`, including a check that the external stays self-contained. |
+> | 11 | No Max-initiated output | Done. `print` is delivered during a cell and, via the timed-poll patch against xeus-zmq, within ~50ms while the kernel is idle. |
+>
+> **Item 11 was completed subsequently** by patching xeus-zmq to poll with a
+> timeout and invoke a callback on each idle tick
+> (`patches/xeus-zmq-0003-*`). The same patch fixes the shutdown hang at its
+> root, so the deliberate leak of the kernel, context and impl described in
+> finding 3.1 is gone entirely -- the thread is joined and everything is
+> destroyed normally, with a deadline-bounded fallback to the old behaviour.
+> `tests/test_server_shutdown.cpp` starts a real kernel and asserts that stop,
+> join and destruction all complete; reverting the poll to `-1` makes those
+> tests hang, which their watchdog reports as a failure.
+>
+> Additional defects found while fixing the above, none of which were in the
+> original review:
+>
+> - `execute_input` was published twice per cell (xeus publishes it, and the
+>   interpreter published it again).
+> - `dict` shipped Max dictionary text under the `application/json` mime type.
+> - `xserver_zmq_impl::m_request_stop` was a plain `bool` read and written from
+>   two threads -- latent, but load-bearing once the poll loop reads it per tick.
+> - Stream output carried no trailing newline. Jupyter concatenates stream text
+>   verbatim, so consecutive `print` messages ran together and the next `Out[n]`
+>   collided with them. Found by manual testing in Max, not by the suite.
+> - Every `object_post`/`object_warn`/`object_error` double-prefixed its message
+>   (`kernel: kernel: ...`), since Max already prefixes the object name.
+>
+> All fixed.
 
----
+**Date:** 2026-08-17
+**Reviewed at:** `ed57795` (clean tree)
+**Scope:** first-party C++ (`source/projects/kernel/*.cpp|h`, 1255 lines including tests), build system, tests, packaging, documentation. Vendored `xeus`, `xeus-zmq`, `nlohmann/json`, `doctest` were reviewed only where this project patches or configures them.
 
-## 1. Executive Summary
-
-mx-kernel is a well-executed proof-of-concept that embeds a Jupyter kernel inside a Max/MSP external, enabling bidirectional communication between Max and Jupyter clients over ZMQ. The C++ implementation is clean, memory-safe (RAII throughout), and correctly implements the Jupyter wire protocol v5.3. Two non-trivial bugs (xeus-zmq parent_header, shutdown deadlock) have been investigated and resolved with documented pragmatic compromises.
-
-The project is currently a **messaging bridge** -- it routes text between Jupyter and Max outlets -- but lacks the execution semantics that would make it a true computational kernel. The gap between "proof-of-concept" and "useful tool" is where the highest-value work lies.
-
----
-
-## 2. Code Quality
-
-### Strengths
-
-- **Memory safety.** All heap allocations use `std::unique_ptr`. No raw `new`/`delete` pairs leak. The one intentional leak (shutdown) is thoroughly documented and justified.
-- **Error handling.** Every fallible operation is wrapped in `try`/`catch`. Errors are logged to the Max console via `object_error()` without crashing the host.
-- **Thread discipline.** The kernel runs on a dedicated thread. No shared mutable state between the Max main thread and the kernel thread. ZMQ serializes all cross-thread communication.
-- **Readable code.** Clear naming conventions, reasonable function sizes, and inline comments at decision points.
-
-### Issues
-
-| Severity | Location | Issue |
-|----------|----------|-------|
-| Medium | `kernel.cpp:28-39` | `t_kernel` mixes C-style Max struct with C++ members (`std::string`, `std::unique_ptr`). If Max ever `memcpy`s this struct, the C++ members will be corrupted. Consider a pimpl pattern: keep the `t_object` header in the C struct and put everything else behind an opaque pointer. |
-| Medium | `kernel.cpp:480-568` | `kernel_start()` is ~90 lines with nested try-catch, manual cleanup, and multiple early returns. Extract a helper that returns a `Result<KernelConfig>` or similar, so the Max method just handles success/failure. |
-| Medium | `kernel.cpp:156-210` | `generate_random_key()` uses `rand() % 16` seeded with `time(nullptr)`. This is cryptographically weak for an HMAC key. Use `arc4random_buf()` (available on macOS) or OpenSSL's `RAND_bytes()` -- you already link OpenSSL. |
-| Low | `kernel.cpp:42-153` | `max_interpreter` stores a raw `t_kernel*` back-pointer. If the Max object is freed while the kernel thread is still running, this is a dangling pointer. The shutdown compromise makes this unlikely in practice, but a `std::atomic<bool> alive` flag would add a safety margin. |
-| Low | `kernel.cpp:269-279` | `kernel_thread_func` catches exceptions but only logs when `x->debug` is true. Kernel thread failures should always be logged -- they are silent crashes otherwise. |
-| Low | `kernel.cpp` | No `#pragma once` or include guards visible. Relies on single-TU compilation. Fine for now, but will break if the file is ever split. |
-
-### Style Observations
-
-- Mixing C (`t_kernel`, `object_error`, Max API) and modern C++ (`std::unique_ptr`, lambdas, `nlohmann::json`) is inherent to Max externals, but the boundary could be cleaner.
-- The file is 648 lines -- manageable, but approaching the point where splitting into `interpreter.h/cpp`, `connection.h/cpp`, and `external.cpp` would improve navigability.
-
----
-
-## 3. Architecture
-
-### Current Architecture
-
-```
-Jupyter Client <--ZMQ--> xeus-zmq <---> max_interpreter <---> Max outlets
-```
-
-This is essentially a **message relay**. The interpreter receives text from Jupyter, echoes it out an outlet, and returns a canned "Executed in Max: {code}" response. There is no actual code execution, no state, no evaluation.
-
-### Architectural Concerns
-
-1. **No return path from Max to Jupyter.** Code goes out the left outlet, but there is no mechanism for Max to send results back into the kernel for delivery to Jupyter. The `kernel_eval` method goes the other direction (Max -> Jupyter), but that is a push, not a request-response cycle. This means:
-   - A Jupyter user sends `[route synth freq 440]`
-   - Max receives it on the outlet
-   - The Jupyter user sees "Executed in Max: [route synth freq 440]"
-   - They never see what Max actually *did*
-
-2. **Single-threaded interpreter, multi-threaded reality.** Max outlet calls (`outlet_anything`) from the kernel thread are technically illegal -- Max outlets must be called from the main thread or a scheduler thread. The current code calls `outlet_anything` from within `execute_request_impl`, which runs on the kernel thread. This is a race condition. Use `schedule_delay` or `qelem` to defer outlet calls to the main thread.
-
-3. **Shutdown compromise is load-bearing.** The intentional leak means the kernel can never be cleanly restarted within the same Max session. Starting and stopping multiple times will accumulate leaked resources. For a production tool, this needs a proper solution (possibly a subprocess architecture).
-
-4. **No multiplexing.** Each `kernel` object gets its own ZMQ context and five TCP ports. Running 10 kernels consumes 50 ports. A shared context or IPC transport would scale better.
-
-### Proposed Target Architecture
-
-```
-Jupyter Client
-     |
-     | ZMQ (TCP or IPC)
-     v
-xeus-zmq server (kernel thread)
-     |
-     | lock-free queue (SPSC ring buffer)
-     v
-Max main thread (qelem/clock callback)
-     |
-     | outlet_anything / object_method
-     v
-Max patch graph
-     |
-     | inlet callback
-     v
-Result queue -> kernel thread -> Jupyter publish
-```
-
-This architecture solves the thread-safety issue, enables a proper return path, and keeps Max operations on the correct thread.
+> This file replaces an earlier review written against `dc5740d`, when the external was a single 648-line `kernel.cpp`. That version is still in git history. Roughly half its findings have since been addressed by the split into `external.cpp` / `interpreter.cpp` / `connection.cpp` and the move to `arc4random_buf`; the rest are re-derived below against the current code.
 
 ---
 
-## 4. Feature Assessment
+## 1. Summary
 
-### What Works
+mx-kernel embeds a Jupyter kernel inside a Max/MSP external so a Jupyter client can drive a Max patch over ZMQ. The protocol layer works: the kernel binds five channels, writes a spec-compliant connection file, and a real round trip (Jupyter cell -> Max outlet -> `result` message -> Jupyter output) is implemented end to end. The module split is good, the Max-free modules are genuinely testable, and the two hard bugs the project hit (xeus-zmq `parent_header` null, shutdown join deadlock) were diagnosed properly rather than papered over.
 
-| Feature | Status | Quality |
-|---------|--------|---------|
-| Kernel lifecycle (start/stop) | Working | Good |
-| Connection file generation | Working | Good |
-| Jupyter console connection | Working | Good |
-| Code echo to Max outlets | Working | Minimal |
-| Kernel info/metadata | Working | Good |
-| Debug logging | Working | Good |
-| Multi-kernel instances | Working | Untested at scale |
+What holds it back is not the protocol work. Three things stand between this and something usable by anyone other than its author:
 
-### What Is Missing (Critical)
+1. **Object teardown has a use-after-free window** (Section 3.1). The design deliberately leaks the `xkernel`, but then deletes the `t_kernel_impl` that the leaked kernel's interpreter still points at, and frees the qelem that same interpreter still calls. This is the most serious finding.
+2. **Lifecycle is one-shot.** After `start`, `eval` is permanently broken; after `stop`, `start` cannot succeed; after a Jupyter shutdown request, every subsequent cell times out. Each is a small bug, but together they mean the object works exactly once per instantiation (Section 3.2).
+3. **The binary is not distributable.** `kernel.mxo` links `/opt/homebrew/opt/...` absolute paths for libzmq and libcrypto; it will fail to load on any machine without Homebrew at that exact prefix (Section 6.1).
 
-| Feature | Impact | Difficulty |
-|---------|--------|------------|
-| **Return path from Max to Jupyter** | Without this, the kernel cannot report results. It is a one-way bridge. | Medium |
-| **Thread-safe outlet calls** | Current code has a race condition calling outlets from the kernel thread. | Low-Medium |
-| **Actual code execution** | The kernel echoes strings. It does not evaluate anything. | Depends on scope |
-| **Restart support** | Due to the shutdown leak, kernels cannot be restarted cleanly. | High (xeus limitation) |
+The result-passing design also has a correctness gap independent of any bug: results are not correlated with the requests that asked for them (Section 3.3).
 
-### What Is Missing (Important)
-
-| Feature | Impact | Difficulty |
-|---------|--------|------------|
-| Code completion | Tab-completion in Jupyter returns nothing | Medium |
-| History persistence | Command history is lost on restart | Low |
-| Interrupt handling | No way to interrupt a running "execution" | Medium |
-| Rich output (MIME) | Only plain text -- no images, HTML, plots | Medium |
-| Error reporting | No stderr stream, no traceback formatting | Low |
-| Kernel spec installation | Users must manually manage connection files | Low |
+Severity labels below: **High** = memory-unsafe or silently wrong output; **Medium** = feature does not work as documented; **Low** = hygiene. Findings marked *(by inspection)* were derived from reading the code, not reproduced under a debugger.
 
 ---
 
-## 5. Usability
+## 2. What works well
 
-### Current Workflow
-
-1. Open Max patch with `kernel` object
-2. Send `start` message
-3. Find the connection file path in the Max console
-4. Open terminal, run `jupyter console --existing <path>`
-5. Type code in Jupyter
-6. See output in Max console
-7. Manually route Max output somewhere useful
-
-This is a developer workflow, not a user workflow. The friction points:
-
-- **Connection file discovery** requires reading the Max console. Should be automatic or copyable.
-- **No kernel spec** means Jupyter Notebook/Lab cannot discover the kernel. Users must always use `--existing`.
-- **No feedback loop** means Jupyter shows canned responses, not actual Max output.
-- **The help patch** (`kernel.maxhelp`) is minimal -- it shows the object but does not demonstrate a useful workflow.
-
-### Recommendations
-
-1. **Auto-copy connection file path to clipboard** on `start`, or output it as a Max message that can be routed to `[clipboard]`.
-2. **Install a kernel spec** so `jupyter kernelspec list` shows `mx-kernel` and Jupyter Lab/Notebook can launch it directly.
-3. **Provide example patches** showing real use cases: live coding a synth, controlling Jitter, automating patch state.
-4. **Add a `[kernel]` overview/reference page** to the Max documentation format.
+- **Module boundary.** `connection.cpp` and `message_queue.h` have no Max SDK dependency and are unit-tested without it (`tests/CMakeLists.txt` links only `connection.cpp`). That is the right seam, and it is enforced by the build rather than by convention.
+- **Thread hand-off.** Kernel thread -> main thread goes through `ThreadSafeQueue` plus `qelem_set`, which is the correct Max idiom; `outlet_anything` is never called off the main thread. Main thread -> kernel thread goes through a second queue. No shared mutable state beyond the queues and one atomic.
+- **Key generation.** `generate_random_key()` (`connection.cpp:20`) uses `arc4random_buf` on Apple platforms. 256 bits of CSPRNG output for an HMAC key is correct, and the earlier `rand()`-based version is gone.
+- **Failure reporting.** Every fallible path reports through `object_error` on the offending object rather than `post()`, so errors are attributable in the Max console.
+- **Investigation notes.** `source/notes/jupyter_console_issue.md` and `shutdown_compromise.md` record the full diagnostic path including rejected alternatives. This is unusually good for a personal project and is the reason the shutdown compromise reads as a decision rather than an accident.
 
 ---
 
-## 6. Build System and Dependencies
+## 3. Correctness
 
-### Current State
+### 3.1 High: use-after-free on object deletion *(by inspection)*
 
-- CMake + Makefile wrapper. Works, but the Makefile duplicates CMake logic.
-- Three vendored submodules (xeus, xeus-zmq, nlohmann/json) at ~40MB. This is heavy but unavoidable without a system package manager.
-- Runtime dependency on Homebrew `libzmq` and `libcrypto` -- dynamically linked. This means the external will crash on machines without Homebrew. Should either statically link or bundle the dylibs.
+`kernel_free` (`external.cpp:149-190`) does, in order: stop the kernel, detach the kernel thread, `qelem_free(x->outlet_qelem)`, `impl->kernel.release()`, `impl->alive.store(false)`, `delete impl`.
 
-### Issues
+The `release()` call is deliberate and documented -- destroying the `xkernel` would join threads blocked in `poll_channels` and hang Max. But the released `xkernel` owns the `max_interpreter` (ownership was transferred at `external.cpp:276`), and that interpreter holds `m_impl`, a raw pointer to the object being deleted on the next line. The detached kernel thread is still alive and still serving the ZMQ sockets.
 
-| Issue | Severity |
-|-------|----------|
-| Dynamic linking to Homebrew libs breaks portability | High |
-| No Windows or Linux build support | Medium (documented) |
-| No CI/CD pipeline | Medium |
-| No automated tests in `make test` (Makefile target does not exist) | High (given CLAUDE.md mandates `make test`) |
-| Vendored submodules are large and version-pinned implicitly | Low |
+Concretely, if a Jupyter client sends an `execute_request` while or after the Max object is being freed:
 
-### Recommendations
+- `execute_request_impl` writes to `m_impl->outlet_queue` (`interpreter.cpp:39`) -- freed memory.
+- It then calls `qelem_set(m_impl->qelem)` (`interpreter.cpp:43`) -- a qelem freed at `external.cpp:170`.
+- Its poll loop reads `m_impl->alive` and `m_impl->result_queue` (`interpreter.cpp:56-57`) -- freed memory, and the loop can run for up to `timeout` seconds after the free.
 
-1. **Static-link libzmq and libcrypto** into the `.mxo` bundle, or use `install_name_tool` to bundle dylibs in the package.
-2. **Add a `make test` target.** Even if it only runs unit tests on the connection file generation and protocol handler logic (no Max dependency needed for those).
-3. **Add GitHub Actions CI** for at least the build step.
-4. **Pin submodule versions** in a `VERSIONS` file or CMake variable.
+`impl->alive.store(false)` immediately before `delete impl` does not close this: the store and the reader's `load()` race against the delete, not against each other, and even a correctly observed `false` only stops the poll loop -- steps 1 and 2 have already happened by then.
+
+The window is not narrow. Deleting a `[kernel]` object in a patch while a Jupyter console sits at a prompt is a normal user action, and the connection file is removed at `external.cpp:177` but the sockets stay bound, so a client that is already connected keeps working.
+
+Two ways out, in increasing order of effort:
+
+- **Leak the impl too.** If the kernel is deliberately leaked, everything it transitively points at must be leaked with it. Replace `delete impl` with `impl->alive.store(false)` and a release of ownership (e.g. hold the impl in a `unique_ptr` on `t_kernel` and `release()` it), and stop calling `qelem_free` when a kernel was ever started. Consistent with the existing compromise, costs a few KB per freed object, and closes the hole completely. This is the minimal correct fix.
+- **Break the back-pointer.** Give the interpreter a `shared_ptr<t_kernel_impl>` (or a `weak_ptr` it locks per call), so the impl outlives whichever side dies last and the interpreter can detect that the Max object is gone. More code, but it also removes the need to leak the qelem and makes the ownership story explainable in one sentence.
+
+Either way, `qelem_free` and the impl must not be freed while a detached thread can still reach them.
+
+### 3.2 Medium: the object only works once
+
+Three independent defects, all in the same area:
+
+**`eval` is dead after `start`.** `kernel_start` moves the interpreter into the kernel (`external.cpp:276`), leaving `impl->interpreter` null. `kernel_eval` guards on exactly that pointer (`external.cpp:383`) and errors with "interpreter not initialized". So `eval` works only before the kernel is started, which is the opposite of what `source/projects/kernel/README.md` documents. The guard is also spurious -- `kernel_eval` never touches the interpreter; it concatenates atoms and calls `outlet_anything`. Deleting the guard fixes the symptom; see 3.4 for the deeper issue that `eval` has nowhere to send anything.
+
+**`start` after `stop` cannot succeed.** `kernel_stop` (`external.cpp:336-370`) calls `impl->kernel->stop()` and detaches the thread but leaves `impl->kernel` non-null, so the next `start` hits the `if (impl->kernel)` guard at line 250 and reports "already running". Even if that guard were cleared, `impl->interpreter` is null from the first start, so line 255 would then reject the restart. A working restart needs both: release `impl->kernel` in `kernel_stop`, and construct a fresh `max_interpreter` at the top of `kernel_start` rather than at object creation.
+
+**Jupyter shutdown permanently disarms the object.** `shutdown_request_impl` (`interpreter.cpp:153`) sets `alive = false` and nothing ever sets it back. `alive` is also the poll-loop condition at `interpreter.cpp:56`, so after any client sends a shutdown request, every later cell skips the wait entirely and falls through to the "no response" branch -- while the Max side still reports the kernel as running. Use a separate flag for shutdown, or reset `alive` on `start`.
+
+### 3.3 Medium: results are not correlated with requests
+
+`ResultMessage` carries an `execution_counter` field (`message_queue.h:30`) that is never written and never read. `execute_request_impl` pops whatever happens to be at the head of `result_queue` (`interpreter.cpp:57`). Consequences:
+
+- A `result` message sent from Max at any time before a cell runs is queued and consumed by the *next* unrelated cell.
+- If a patch answers one cell with two `result` messages, the second stays queued and is delivered as the answer to the following cell. Every subsequent cell is then off by one, permanently, with no error anywhere.
+- A late reply, arriving after the timeout, poisons the next cell the same way.
+
+None of this surfaces as a failure -- it surfaces as wrong output attributed to the wrong input, which is the worst failure mode for a notebook.
+
+Minimum fix: drain `result_queue` at the top of `execute_request_impl` so each cell starts clean. Better: stamp the counter into the `OutletMessage` (it already carries one), require patches to echo it back, and discard non-matching results. That costs one extra atom in the outlet message and makes the round trip verifiable.
+
+Related, same function: a `result` whose `stream_name` is set publishes a stream and then sets `got_result = true` and breaks (`interpreter.cpp:72-86`), so a cell can produce either streamed output or a result, never streamed output followed by a result. That is a real restriction for the "Max prints progress, then answers" case.
+
+### 3.4 Medium: no Max-initiated path to Jupyter
+
+Every message to a client must originate inside an `execute_request`. `kernel_eval` (`external.cpp:381`) sends its text to the *right* outlet -- documented as the status outlet -- and never to Jupyter at all, despite `source/projects/kernel/README.md` describing it as "Evaluates code through the Jupyter interpreter". Likewise `kernel_dict` pushes onto `result_queue`, which is only ever drained inside an execute cycle, so a `dict` sent while no cell is running sits in the queue and later corrupts an unrelated cell per 3.3.
+
+This is the main architectural gap. A kernel that can only answer, never speak, cannot support the use cases the notes list (logging analysis results from Max, streaming patch state). xeus does support unsolicited IOPub publishing; it needs a channel from the main thread to the kernel thread that is not the request/response queue.
+
+### 3.5 Medium: `dict` output is labelled JSON but is not JSON
+
+`kernel_dict` (`external.cpp:507-559`) serialises via `dictobj_dictionarytoatoms`, concatenates the atoms into a string, and tags it `mime_type = "application/json"`. The Max dictionary text format is not JSON. The comment at lines 547-549 acknowledges this ("may not be direct JSON, but we attempt it") but no parse is actually attempted -- the raw text is shipped under the JSON mime type unconditionally. Clients that pretty-print `application/json` will show a parse error or nothing.
+
+Either walk the dictionary with `dictionary_getkeys` plus the typed getters and build an `nl::json` properly, or drop the mime type and send `text/plain`. Shipping non-JSON under a JSON label is the one option that should be off the table.
+
+### 3.6 Low: blocking wait holds the shell channel
+
+`execute_request_impl` busy-waits up to `timeout` seconds in 10 ms sleeps (`interpreter.cpp:53-89`). During that window the xeus shell thread is blocked, so no other shell request is served -- a client asking for completion or kernel info during a slow cell sees a hang. With the default `@timeout 30` and a patch that never answers, that is 30 seconds of unresponsiveness per cell.
+
+A `std::condition_variable` on the result queue removes the polling (and cuts latency from ~10 ms to ~0), but not the head-of-line blocking, which is inherent to answering synchronously. If long-running Max work is expected, the cell should reply immediately and stream results later via the mechanism from 3.4.
+
+Also here: `timeout` is not validated. `@timeout 0` or a negative value puts the deadline in the past, so every cell falls straight through to "no response". Clamp to a sane minimum and document that behaviour.
+
+### 3.7 Low: timeout is reported as success
+
+On timeout the interpreter publishes "Sent to Max (no response)" as *stdout* and then replies `status: "ok"` (`interpreter.cpp:92-103`). Programmatic clients see a successful execution with no result. A timeout is an error condition and should reply `status: "error"` with a distinguishable `ename`.
+
+### 3.8 Low: non-atomic timeout, dropped atom types
+
+- `impl->timeout` is a plain `long` written by the main thread at `external.cpp:262` and read by the kernel thread at `interpreter.cpp:52`. In practice the write only happens at start, but it is still a technically racy pair; `std::atomic<long>` costs nothing here.
+- The four atom-to-string loops (`external.cpp:389-398`, `470-479`, `484-493`, `533-542`) all silently drop anything that is not `A_SYM`/`A_LONG`/`A_FLOAT`. The same loop is duplicated four times and should be one `atoms_to_string(argc, argv)` helper that at least warns on unhandled types.
 
 ---
 
-## 7. Testing
+## 4. Security
 
-### Current State
+Everything binds to `127.0.0.1`, so the exposure is local-user only. Within that scope:
 
-**No automated tests exist.** Testing is entirely manual per `source/notes/testing.md`.
+**Medium: the connection file is world-readable.** `write_connection_file` (`connection.cpp:93`) writes via `std::ofstream`, giving 0644 under a typical umask. The file contains the HMAC key and the live ports. Any local user or process can read it and connect to the kernel, and connecting means sending arbitrary messages into the user's Max patch. Jupyter itself writes connection files 0600 for exactly this reason. Fix with `chmod`/`std::filesystem::permissions` to `owner_read | owner_write` immediately after creation -- ideally before writing the key, by creating the file with restrictive permissions in the first place.
 
-This is the single largest gap in the project. The CLAUDE.md rules mandate `make test` after each change, but the target does not exist.
+**Low: `std::system` with an interpolated `HOME`.** `kernel_install` (`external.cpp:574-575`) builds `mkdir -p "$HOME/..."` as a shell string. A `HOME` containing a double quote escapes the quoting and executes attacker-chosen text. The threat model is thin -- you generally control your own `HOME` -- but there is no reason to spawn a shell at all: `std::filesystem::create_directories` does the job with no quoting question. The same applies to the `std::system("mkdir -p ...")` in `tests/test_connection.cpp:67`.
 
-### What Can Be Tested Without Max
+**Low: kernel name is unsanitised in a path.** `kernel_name` comes straight from the `@name` symbol and is interpolated into the connection file path (`connection.cpp:72`). A name containing `/` or `..` writes outside the runtime directory. Restrict to `[A-Za-z0-9._-]` and reject the rest.
 
-- Connection file JSON generation and parsing
-- Protocol handler responses (kernel_info, is_complete, etc.)
-- Port generation and configuration building
-- HMAC key generation (format, length, entropy)
-- Message serialization/deserialization
-
-### What Requires Max (or Mocking)
-
-- Outlet routing
-- Kernel lifecycle
-- Thread management
-- Full integration tests
-
-### Recommendation
-
-Create a `tests/` directory with a lightweight C++ test framework (Catch2 or doctest, both header-only). Extract testable logic from `kernel.cpp` into separate headers and write unit tests for all pure functions. This is achievable without refactoring the Max integration code.
+**Low: non-Apple RNG fallback.** `connection.cpp:27-30` fills the key from `std::random_device` one byte at a time. That is fine on Linux and macOS, but `std::random_device` is permitted to be deterministic, and historically was on MinGW. Since Windows is a stated future target, this fallback becomes a real weakness the moment the port happens. Prefer `BCryptGenRandom` on Windows and `getrandom`/`/dev/urandom` on Linux.
 
 ---
 
-## 8. Documentation
+## 5. Tests
 
-### Strengths
+`make test` passes: 6 cases, 109 assertions, doctest 2.4.11. Verified during this review.
 
-- The `source/notes/` directory is excellent engineering documentation. The shutdown compromise and parent_header investigation are model examples of decision logs.
-- The kernel README covers all user-facing features.
-- Code comments explain *why*, not just *what*.
+**Coverage is the problem.** The test target compiles `connection.cpp` and the `message_queue.h` templates -- roughly 180 lines of the 950 first-party non-test lines. `interpreter.cpp`, which contains all the protocol semantics and every bug in Sections 3.2-3.7, has no tests at all. `external.cpp` cannot be tested without Max, which is expected and fine.
 
-### Weaknesses
+The interpreter is *nearly* testable already: its only Max dependency is the `extern "C" void qelem_set(void*)` declaration at `interpreter.cpp:10-12`. Replace that with a `std::function<void()> notify` stored on `t_kernel_impl` and set by `external.cpp`, and `interpreter.cpp` links into the test binary with a no-op notifier. That single change unlocks tests for the cases that matter most:
 
-- The root `README.md` is 7 lines. For an open-source project, this is the front door. It should include: what the project does, a screenshot/demo, installation instructions, quick start, and links to detailed docs.
-- No `CHANGELOG.md` or versioning strategy.
-- No API documentation for the Max messages and attributes.
-- No architecture diagram (the notes describe it in text but a visual would help).
+- a result arriving before the deadline produces `execution_result` and `status: ok`;
+- no result within the deadline produces the timeout path (and, after fixing 3.7, an error status);
+- an `error`-prefixed result produces `publish_execution_error` and `status: error`;
+- a stale result left in the queue does not leak into the next execution (this is 3.3 -- write the test first, watch it fail);
+- `shutdown_request` followed by `start` leaves the kernel able to execute (3.2).
 
----
+Smaller notes:
 
-## 9. Suggested New Features and Directions
-
-### 9.1 Max Scripting Language Support
-
-**Value: Very High | Effort: High**
-
-Implement a real interpreter for Max messages. Instead of echoing strings, parse Jupyter input into Max message syntax and execute it via `object_method`, `typedmess`, or the Max scripting API (`max objectfile`, `script send`, etc.).
-
-Example Jupyter session:
-```
-In [1]: loadbang
-In [2]: send dac~ startwindow
-In [3]: send cycle~ frequency 440
-In [4]: send gain~ gain 0.5
-```
-
-This would make the kernel genuinely useful for live coding and automation.
-
-### 9.2 Bidirectional Data Streaming
-
-**Value: Very High | Effort: Medium**
-
-Add an inlet to the kernel object that accepts Max messages and publishes them to the Jupyter client as IOPub stream output or display_data. This completes the feedback loop:
-
-```
-Max: [kernel] inlet <- data from patch
-Jupyter: displays the data as text, JSON, or a plot
-```
-
-Combined with rich MIME output (9.5), this enables sending audio buffers, Jitter matrices, or dict contents to Jupyter for visualization.
-
-### 9.3 Dict-Based Communication Protocol
-
-**Value: High | Effort: Medium**
-
-Define a structured protocol using Max `dict` objects for communication between Max and Jupyter. Instead of flat strings, pass structured data:
-
-```json
-{"type": "result", "status": "ok", "data": {"freq": 440, "amp": 0.5}}
-```
-
-This would enable Jupyter to display structured results, and Max patches to send typed data back to notebooks.
-
-### 9.4 Kernel Spec Auto-Installation
-
-**Value: High | Effort: Low**
-
-Add a `make install-kernelspec` target (and a Max message `install`) that writes a standard Jupyter kernel spec to `~/.local/share/jupyter/kernels/mx-kernel/kernel.json`. This allows Jupyter Lab and Notebook to discover and launch the kernel natively.
-
-Alternatively, implement a launcher script that starts Max, loads a patch with the kernel object, and connects -- enabling Jupyter to manage the full lifecycle.
-
-### 9.5 Rich Output (MIME Types)
-
-**Value: High | Effort: Medium**
-
-Support publishing rich output from Max to Jupyter:
-- `image/png` -- Jitter matrix snapshots
-- `application/json` -- dict contents
-- `text/html` -- formatted tables of patch state
-- `audio/wav` -- buffer~ contents for inline playback
-
-xeus already supports `publish_display_data()` with arbitrary MIME bundles.
-
-### 9.6 Variable Namespace / State
-
-**Value: Medium | Effort: Medium**
-
-Maintain a key-value store in the kernel that maps names to Max objects or values. This enables:
-```
-In [1]: freq = 440        # Store in namespace
-In [2]: send osc~ freq    # Reference by name
-In [3]: freq              # Query current value
-Out[3]: 440
-```
-
-This would give the kernel a notion of "state" beyond fire-and-forget messaging.
-
-### 9.7 Patch Introspection
-
-**Value: Medium | Effort: High**
-
-Use the Max scripting API to inspect the current patcher and report back to Jupyter:
-```
-In [1]: objects()
-Out[1]: ['cycle~', 'gain~', 'dac~', 'number', 'kernel']
-
-In [2]: connections('cycle~')
-Out[2]: [('cycle~ outlet 0', 'gain~ inlet 0')]
-```
-
-This would be uniquely powerful for debugging and documenting Max patches.
-
-### 9.8 IPC Transport Option
-
-**Value: Medium | Effort: Low**
-
-Support `ipc://` transport in addition to TCP. This is faster, avoids port allocation, and avoids firewall issues. xeus-zmq already supports it.
-
-### 9.9 Multi-Platform Support
-
-**Value: Medium | Effort: High**
-
-Extend the build system to produce `kernel.mxe64` (Windows) and potentially Linux builds. The main barriers are:
-- Max SDK availability (Windows only for `.mxe64`)
-- Homebrew dependency management (use vcpkg or conan on Windows)
-- Dynamic library bundling
-
-### 9.10 Jupyter Widget Support
-
-**Value: Medium-High | Effort: Very High**
-
-Implement the Jupyter comm protocol to support ipywidgets. This would allow interactive sliders, buttons, and displays in Jupyter that control Max parameters in real time. This is a substantial undertaking but would be a differentiating feature.
+- The `extern "C"` declaration is fragile on its own terms. It duplicates a Max SDK prototype with the argument typed as `void*` instead of `t_qelem*`; a signature change upstream would link cleanly and misbehave at runtime. The `std::function` approach removes the duplicate declaration entirely.
+- `tests/test_connection.cpp` mutates the real `JUPYTER_RUNTIME_DIR` and writes into a fixed `/tmp/mx-kernel-test`. Two concurrent test runs collide, and the `rmdir` at the end silently fails if anything else is in the directory. Minor, but a per-run unique directory is two lines.
+- There is no CI. A GitHub Actions job running `make test` on macOS would catch build breakage in the modules that do not need Max, which is most of the ones under active change.
 
 ---
 
-## 10. Suggested Refactorings
+## 6. Build and packaging
 
-### 10.1 Split `kernel.cpp`
+### 6.1 High: the built external is not distributable
 
-**Priority: Medium**
+`otool -L externals/kernel.mxo/Contents/MacOS/kernel` shows:
 
-Split into:
-- `interpreter.h/cpp` -- `max_interpreter` class
-- `connection.h/cpp` -- connection file generation, port allocation, key generation
-- `external.cpp` -- Max object registration, methods, attributes
-- `types.h` -- `t_kernel` struct definition
-
-Benefits: testability, readability, compilation speed.
-
-### 10.2 Thread-Safe Message Queue
-
-**Priority: High**
-
-Replace direct `outlet_anything()` calls from the kernel thread with a lock-free SPSC queue + `qelem` drain on the main thread. This eliminates the current thread-safety violation.
-
-```cpp
-// Kernel thread:
-message_queue.push({symbol, argc, argv});
-qelem_set(x->output_qelem);
-
-// Main thread (qelem callback):
-while (auto msg = message_queue.pop()) {
-    outlet_anything(x->outlet_left, msg->sym, msg->argc, msg->argv);
-}
+```
+/opt/homebrew/opt/zeromq/lib/libzmq.5.dylib
+/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib
 ```
 
-### 10.3 Pimpl for `t_kernel`
+Absolute Homebrew paths baked into the binary. On a machine without Homebrew -- or an Intel Mac, where the prefix is `/usr/local` -- the external fails to load, and Max's failure mode for a missing dylib is an unhelpful "object not found" in the console. Every non-author user hits this.
 
-**Priority: Medium**
+Options, best first:
 
-Move C++ members out of the Max struct:
+- **Bundle and relocate.** Copy both dylibs into `kernel.mxo/Contents/Frameworks/` and rewrite the install names to `@loader_path/../Frameworks/...` with `install_name_tool`, as a post-build step. This is the standard approach for Max externals and keeps the build fast.
+- **Link statically.** Set `XEUS_ZMQ_STATIC_DEPENDENCIES ON` (currently forced `OFF` at `source/projects/kernel/CMakeLists.txt`) and provide static libzmq and libcrypto. Simplest to distribute, but pulls OpenSSL's licensing into the binary and needs static builds of both libraries available.
 
-```cpp
-struct t_kernel_impl {
-    std::unique_ptr<xeus::xkernel> kernel;
-    std::unique_ptr<xzmq::xcontext> context;
-    std::unique_ptr<std::thread> kernel_thread;
-    std::string connection_file;
-    // ...
-};
+Either way this needs to be part of `make build`, not a manual step, or it will be forgotten.
 
-struct t_kernel {
-    t_object ob;
-    void* outlet_left;
-    void* outlet_right;
-    t_symbol* name;
-    long debug;
-    t_kernel_impl* impl;  // opaque pointer
-};
-```
+The same section also builds a universal binary question: `CMakeLists.txt:46-54` sets `CMAKE_OSX_ARCHITECTURES` to the host processor, and `C74_BUILD_FAT` is off. Max 8 users on Intel therefore need a separate build. Worth deciding explicitly rather than by default.
 
-This prevents Max's C allocator from interfering with C++ object lifecycle.
+### 6.2 Medium: vendored dependencies with an undocumented local patch
 
-### 10.4 Replace `rand()` with Secure RNG
+`xeus`, `xeus-zmq`, `nlohmann/json`, and `doctest` are copied into the repo as tracked files -- 1395 of them -- rather than being submodules. Only `max-sdk-base` is a submodule, even though the Makefile's `update-submodules` target and the README both imply the dependency story is submodule-based.
 
-**Priority: Medium**
+The sharp edge is that `thirdparty/xeus-zmq/src/server/xpublisher.cpp:44-45` carries a local two-line fix (the `parent_header` / `metadata` null fix), and nothing in the vendored tree records that it is patched. The next person to refresh xeus-zmq -- including the author in six months -- deletes the fix and gets a bug whose symptom (`'NoneType' object has no attribute 'get'` in an unrelated Python file) took a full investigation to diagnose the first time. `source/notes/jupyter_console_issue.md` documents it, but nothing links the note to the file.
 
-```cpp
-// Before:
-srand(time(nullptr));
-int nibble = rand() % 16;
+Recommended, cheapest first:
 
-// After:
-#include <Security/Security.h>  // macOS
-std::string generate_random_key(size_t num_bytes = 32) {
-    std::vector<uint8_t> buf(num_bytes);
-    SecRandomCopyBytes(kSecRandomDefault, num_bytes, buf.data());
-    // ... hex encode
-}
-```
+1. Add a comment above the patch naming it as a local divergence and pointing at the note. Two minutes, prevents the worst outcome.
+2. Move the diff into `patches/xeus-zmq-parent-header.patch` and apply it from CMake or the Makefile, so the vendored tree stays pristine and the divergence is one file you can read.
+3. Report it upstream. The fix is small, obviously correct, and benefits every xeus-zmq kernel; carrying it locally forever is the worse end state.
 
-### 10.5 Error Handling Refactor
+Also worth reconsidering: vendoring `nlohmann/json` as full source when the build already finds Homebrew's `nlohmann_json` 3.12.0 for xeus-zmq means two copies of the same library in one build.
 
-**Priority: Low**
+### 6.3 Low: Makefile defects
 
-Replace the nested try-catch in `kernel_start()` with a result type or error-code pattern to flatten the control flow.
+- **`make clean` does not clean.** `clean:` runs `rm -rf exterals build` -- "externals" is misspelled (`Makefile:19`). Stale externals survive every clean, so a build that silently fails can leave you testing yesterday's binary. This is worth fixing today.
+- **`.phony` should be `.PHONY`.** Make's special target is uppercase; the lowercase form declares nothing (`Makefile:6`). The targets currently work by accident, because no files named `test`, `clean`, or `setup` exist -- but `build/` *does* exist as a directory, and `build` only rebuilds because its `clean` prerequisite is itself treated as always-out-of-date. Fragile.
+- **`$(call section,...)` expands to nothing.** `section` is never defined, so the "setup complete" and "symlink" banners in `setup`, `update-submodules`, and `link` print nothing (`Makefile:22`, `25`, `43`).
+- **`build` depends on `clean`.** Every build is a full rebuild of xeus and xeus-zmq. ccache softens this, but an incremental target would help the edit-compile loop more.
+- **`make test` configures the entire project**, including the Max external and both xeus trees, to produce a test binary that links only `connection.cpp`. A test-only CMake entry point would turn a multi-minute first run into seconds.
+- **`connect` hardcodes `kernel-testkernel.json`** (`Makefile:33`), so it only works for an object named `testkernel`. Take the name as a variable with that default.
+- **`install-kernelspec` installs a non-functional kernelspec.** Its `argv` is `["echo", "Connect via Max"]` (`Makefile:38`, mirrored in `kernel_install` at `external.cpp:582`). Selecting "Max/MSP" in the Jupyter Lab launcher runs `echo`, which exits without a connection file, and the client hangs or errors. The spec is only useful for making the kernel *visible*; as installed it is a trap. Either document it as discovery-only in the `display_name` (e.g. "Max/MSP (connect to running patch)") or drop the feature.
+
+### 6.4 Low: licensing tension
+
+The project is GPL-3 (`LICENSE`), but the external links the proprietary Max SDK, whose license is not GPL-compatible. GPL-3's requirement that all linked components be distributable under compatible terms is at least arguably violated by distributing a built `.mxo`. Most Max externals ship under MIT or BSD for precisely this reason, and the vendored xeus stack is already BSD-3. Worth a deliberate decision before the first release; if GPL-3 is intended, a Max SDK linking exception should be stated explicitly.
 
 ---
 
-## 11. Comparative Analysis
+## 7. Documentation
 
-### Similar Projects
+The docs are the weakest part of the repo relative to the effort already spent on them -- there is plenty of writing, but a large fraction of it is now false.
 
-| Project | Approach | Difference from mx-kernel |
-|---------|----------|--------------------------|
-| **py/js in Max** | Embeds Python/JS interpreter in Max | Runs code inside Max; no Jupyter integration |
-| **SuperCollider kernel** | Jupyter kernel for SC | Standalone process; full language evaluation |
-| **xeus-cling** | Jupyter C++ kernel | Demonstrates xeus extensibility patterns |
-| **chuck-jupyter** | ChucK audio language kernel | Similar concept, different audio platform |
+**`source/projects/kernel/README.md` is substantially wrong.** Its "Current Limitations" section states that `start` is a placeholder that does not create connection files or bind ports, and that there is "no actual network communication with Jupyter frontends yet". All three claims were true two commits ago and are false now. It also omits `result`, `dict`, and `install` from the methods list, and `timeout` from the attributes list -- that is, it documents none of the messages a user needs for the round trip that is the project's whole point. A reader following this file concludes the project does not work.
 
-mx-kernel's unique value proposition is **bringing Jupyter's notebook interface to Max/MSP** -- literate, reproducible, shareable Max sessions. No existing project does this.
+**The notes are stale in the same way.** `source/notes/shutdown_compromise.md` quotes `kernel.cpp` at length; that file no longer exists. `source/notes/success.md` references `kernel.cpp - Main implementation (+350 lines)`, `TESTING.md`, `SUCCESS.md`, and `CLAUDE.md`, none of which are at those paths, and claims "No memory leaks (RAII)" as an achieved success metric while the design deliberately leaks the kernel and context. `success.md` also still lists the jupyter-console exception under "Known Issues" though `testing.md` and `jupyter_console_issue.md` both record it as fixed. These files are valuable as *investigation records* -- they should be dated and framed as history, not as current status, and the code paths they quote should be updated or removed.
 
-### Competitive Advantage
+**The root `README.md` is five lines** and does not mention how to build, what the object's messages are, or what the message protocol looks like. `how-to-test.md` is the only document that actually explains the round trip, and it reads like a pasted chat transcript (it opens mid-answer with a stray prompt character).
 
-The strongest direction for this project is **not** to become another scripting language for Max (Python and JavaScript already exist as embedded options). Instead, the value lies in:
+**Nothing specifies the wire contract between the external and the patch.** That contract is small and is the single most important thing to write down:
 
-1. **Notebook-driven Max workflows** -- documenting and reproducing patch configurations
-2. **Remote control and automation** -- controlling Max from Python scripts via Jupyter protocol
-3. **Data bridge** -- moving data between Python's scientific stack and Max's audio/visual processing
-4. **Live coding interface** -- Jupyter as a REPL for Max
+```
+kernel -> patch (left outlet):   code execute <text>
+patch -> kernel (inlet):         result <text...>
+                                 result error <ename> <evalue...>
+                                 dict <dict-name>
+```
 
----
+Concrete plan, in priority order:
 
-## 12. Priority Roadmap
+1. Rewrite `source/projects/kernel/README.md` against the current code: all nine methods, all three attributes, the wire contract above, and the actual limitations (no Max-initiated output, one result per cell, timeout semantics).
+2. Expand the root `README.md` to build instructions, the `make` targets, and a pointer to the object docs.
+3. Move `source/notes/*` under a `history/` heading with dates, and strip the stale file references.
+4. Fold `how-to-test.md` into the object README as a "Round trip walkthrough" section, edited into prose.
 
-### Phase 1: Foundation (Make it correct)
-1. Fix thread-safety violation (outlet calls from kernel thread) -- **10.2**
-2. Add `make test` with unit tests for pure functions -- **Section 7**
-3. Replace `rand()` with secure RNG -- **10.4**
-4. Static-link or bundle dynamic libraries -- **Section 6**
-
-### Phase 2: Functionality (Make it useful)
-5. Implement bidirectional data path (Max -> Jupyter) -- **9.2**
-6. Implement basic Max command execution -- **9.1**
-7. Install kernel spec for Jupyter discovery -- **9.4**
-8. Expand README and add example patches -- **Section 8**
-
-### Phase 3: Polish (Make it good)
-9. Dict-based structured communication -- **9.3**
-10. Rich MIME output -- **9.5**
-11. Code completion for Max objects -- part of **9.1**
-12. Split `kernel.cpp` into modules -- **10.1**
-13. Pimpl pattern for `t_kernel` -- **10.3**
-
-### Phase 4: Differentiate (Make it unique)
-14. Patch introspection -- **9.7**
-15. Variable namespace -- **9.6**
-16. Jupyter widget support -- **9.10**
-17. Multi-platform builds -- **9.9**
+The help patch (`help/kernel.maxhelp`) already demonstrates the round trip with `route code` / `prepend result`, which is the right thing to show -- it is ahead of the prose docs.
 
 ---
 
-## 13. Final Assessment
+## 8. Suggested order of work
 
-mx-kernel demonstrates strong C++ engineering and a clear understanding of both the Jupyter protocol and Max/MSP external architecture. The proof-of-concept works. The documentation of technical decisions (especially the shutdown compromise) is unusually thorough for a personal project.
+**Before anything else** (memory safety and a broken build tool):
 
-The project's main risk is **stalling at the proof-of-concept stage**. The gap between "messages flow between Jupyter and Max" and "I can usefully control Max from a notebook" is where the real product value lives. The Phase 1 fixes (thread safety, testing, secure RNG) are necessary groundwork, but Phase 2 (bidirectional data, command execution, kernel spec) is where the project becomes genuinely useful.
+1. Close the teardown use-after-free -- leak the impl and qelem alongside the kernel, or move to shared ownership (3.1).
+2. Fix the `exterals` typo in `make clean` (6.3).
 
-The most impactful single feature would be **bidirectional communication with structured data** (9.2 + 9.3). This transforms the kernel from a novelty into a tool: Python scripts can send commands to Max and receive results, enabling automation, testing, and data analysis workflows that are currently impossible in the Max ecosystem.
+**To make it usable by a second person:**
+
+3. Bundle or statically link libzmq and libcrypto so the external loads off the author's machine (6.1).
+4. Fix the lifecycle: drop the spurious `eval` guard, release the kernel on `stop`, construct the interpreter in `start`, stop letting shutdown latch `alive` off (3.2).
+5. Drain stale results at the start of each execution, then correlate by execution counter (3.3).
+6. `chmod 0600` the connection file (Section 4).
+7. Rewrite the object README against the current code, including the wire contract (Section 7).
+
+**To keep it working:**
+
+8. Replace `qelem_set` with an injected notifier and put `interpreter.cpp` under test (Section 5).
+9. Mark the xeus-zmq patch in-tree, extract it to a patch file, and report it upstream (6.2).
+10. Add a CI job running `make test`.
+
+**Then the design gap:**
+
+11. Build a Max-initiated output path so the kernel can stream to a client outside an execute cycle (3.4). This is the item that decides whether the project stays a request/response bridge or becomes a live-coding surface -- worth designing before more features land on top of the current model.

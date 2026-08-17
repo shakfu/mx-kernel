@@ -1,0 +1,194 @@
+From: mx-kernel
+Subject: [PATCH] Poll the server loop with a timeout; add an idle callback
+
+xserver_zmq_default::start_impl calls poll_channels(-1), which blocks until a
+message arrives. That has two consequences for an embedded kernel.
+
+1. stop() cannot take effect. stop_impl() sets a flag, but the loop only
+   re-tests it after poll_channels returns, and poll_channels does not return
+   until a client sends something. If nothing arrives -- the normal case after
+   a shutdown -- the loop never exits, never reaches stop_channels(), and the
+   publisher and heartbeat threads never receive their stop message. The
+   xserver_zmq_impl destructor then blocks forever joining them:
+
+       xserver_zmq_impl::~xserver_zmq_impl()
+         xthread::~xthread() -> join() -> __ulock_wait   [blocked]
+
+   For a kernel embedded in a host application, that is a hang of the host on
+   quit. The only workaround from outside the library is to leak the kernel and
+   context deliberately, which is what this project did before this patch.
+
+2. Nothing can be published while the kernel is idle. The IOPub socket is owned
+   by this thread, ZMQ sockets are not thread-safe, and this thread is parked
+   in poll(). An embedder that wants to emit output not triggered by an
+   execute_request has nowhere to do it safely.
+
+This patch polls with a configurable timeout (default 100ms) and invokes an
+optional callback on each tick where no message arrived. That fixes both: the
+loop observes is_stopped() promptly and shuts the channels down properly, and
+the callback runs on the thread that owns the sockets, so an embedder can
+publish from it.
+
+Setting a negative timeout restores the previous blocking behaviour.
+
+Also makes xserver_zmq_impl::m_request_stop atomic. It is written by the thread
+calling stop() and read by the server thread. That was already a data race, but
+a benign-looking one while the loop was parked in poll(); once the loop reads
+the flag on every tick the compiler is free to hoist the load out of the loop,
+and a stop request can be missed entirely.
+
+Verified by integration tests in
+source/projects/kernel/tests/test_server_shutdown.cpp, which start a real
+kernel on loopback and assert that stop() is observed, that the thread joins,
+and that the destructor completes. Reverting the poll change to -1 makes those
+tests hang, which their watchdog reports as a failure.
+
+Applies to: xeus-zmq 3.1.1
+Upstream: not yet reported -- see patches/README.md
+
+diff -ru a/include/xeus-zmq/xserver_zmq.hpp b/include/xeus-zmq/xserver_zmq.hpp
+--- a/include/xeus-zmq/xserver_zmq.hpp
++++ b/include/xeus-zmq/xserver_zmq.hpp
+@@ -10,6 +10,7 @@
+ #ifndef XEUS_SERVER_ZMQ_HPP
+ #define XEUS_SERVER_ZMQ_HPP
+ 
++#include <functional>
+ #include <optional>
+ 
+ #include "xeus/xeus_context.hpp"
+@@ -30,8 +31,31 @@
+ 
+         using xserver::notify_internal_listener;
+ 
++        // LOCAL PATCH (mx-kernel) -- idle callback and configurable poll
++        // timeout. See patches/README.md.
++        //
++        // An embedded kernel needs two things the blocking poll cannot give:
++        // a chance to notice that stop() was requested, and a chance to do
++        // work on the thread that owns the ZMQ sockets (publishing on IOPub
++        // from any other thread is a data race). Polling with a timeout and
++        // invoking a callback on each idle tick provides both.
++        //
++        // Both setters must be called before start(); they are not
++        // synchronised, and the server thread reads them once it is running.
++        using idle_callback_type = std::function<void()>;
++        void set_idle_callback(idle_callback_type cb);
++
++        // Poll timeout in milliseconds. A negative value blocks indefinitely,
++        // which restores the historical behaviour but means stop() is not
++        // observed until the next message arrives.
++        void set_poll_timeout(long timeout_ms);
++        long get_poll_timeout() const;
++
+     protected:
+ 
++        // Invoked by inheriting classes when a poll times out with no message.
++        void notify_idle();
++
+         xserver_zmq(xcontext& context,
+                     const xconfiguration& config,
+                     nl::json::error_handler_t eh);
+@@ -64,6 +88,10 @@
+         void update_config_impl(xconfiguration& config) const override;
+ 
+         std::unique_ptr<xserver_zmq_impl> p_impl;
++
++        // LOCAL PATCH (mx-kernel)
++        idle_callback_type m_idle_callback;
++        long m_poll_timeout = 100;
+     };
+ 
+     XEUS_ZMQ_API
+diff -ru a/src/server/xserver_zmq.cpp b/src/server/xserver_zmq.cpp
+--- a/src/server/xserver_zmq.cpp
++++ b/src/server/xserver_zmq.cpp
+@@ -31,6 +31,30 @@
+     // API for inheriting classes //
+     ////////////////////////////////
+ 
++    // LOCAL PATCH (mx-kernel) -- see patches/README.md
++    void xserver_zmq::set_idle_callback(idle_callback_type cb)
++    {
++        m_idle_callback = std::move(cb);
++    }
++
++    void xserver_zmq::set_poll_timeout(long timeout_ms)
++    {
++        m_poll_timeout = timeout_ms;
++    }
++
++    long xserver_zmq::get_poll_timeout() const
++    {
++        return m_poll_timeout;
++    }
++
++    void xserver_zmq::notify_idle()
++    {
++        if (m_idle_callback)
++        {
++            m_idle_callback();
++        }
++    }
++
+     void xserver_zmq::start_publisher_thread()
+     {
+         p_impl->start_publisher_thread();
+diff -ru a/src/server/xserver_zmq_default.cpp b/src/server/xserver_zmq_default.cpp
+--- a/src/server/xserver_zmq_default.cpp
++++ b/src/server/xserver_zmq_default.cpp
+@@ -25,9 +25,17 @@
+ 
+         publish(std::move(msg), channel::SHELL);
+ 
++        // LOCAL PATCH (mx-kernel) -- poll with a timeout instead of blocking
++        // forever. See patches/README.md.
++        //
++        // With poll_channels(-1) this loop parks until a message arrives, so
++        // after stop() it never re-tests is_stopped(), never reaches
++        // stop_channels() below, and the destructor then blocks forever
++        // joining the publisher and heartbeat threads. Polling lets the loop
++        // exit, and gives an embedder a hook to run work on this thread.
+         while(!is_stopped())
+         {
+-            auto msg = poll_channels(-1);
++            auto msg = poll_channels(get_poll_timeout());
+             if (msg)
+             {
+                 if (msg.value().second == channel::SHELL)
+@@ -38,6 +46,10 @@
+                 {
+                     notify_control_listener(std::move(msg.value().first));
+                 }
++            }
++            else
++            {
++                notify_idle();
+             }
+         }
+ 
+diff -ru a/src/server/xserver_zmq_impl.hpp b/src/server/xserver_zmq_impl.hpp
+--- a/src/server/xserver_zmq_impl.hpp
++++ b/src/server/xserver_zmq_impl.hpp
+@@ -10,6 +10,7 @@
+ #ifndef XEUS_SERVER_ZMQ_IMPL_HPP
+ #define XEUS_SERVER_ZMQ_IMPL_HPP
+ 
++#include <atomic>
+ #include <memory>
+ 
+ #include "zmq.hpp"
+@@ -85,7 +86,12 @@
+ 
+         nl::json::error_handler_t m_error_handler;
+ 
+-        bool m_request_stop;
++        // LOCAL PATCH (mx-kernel) -- atomic, not plain bool.
++        // The server loop polls with a timeout and reads this every tick,
++        // while stop() writes it from another thread. As a plain bool that is
++        // a data race, and the compiler is free to hoist the read out of the
++        // loop, so a stop request could be missed entirely.
++        std::atomic<bool> m_request_stop;
+     };
+ }
+ 

@@ -1,6 +1,17 @@
 # Testing the mx-kernel Jupyter Kernel
 
+> **Historical record.** Written 2025-11-07, during the investigation it describes.
+> Kept because the reasoning and the rejected alternatives are worth having;
+> it is not a description of the current code. Code references below point at
+> files as they were named at the time. For how the object behaves now, see
+> [the object README](../projects/kernel/README.md).
+
 This guide explains how to test the Max/MSP Jupyter kernel with Jupyter clients.
+
+Superseded by the "Manual test walkthrough" section of
+[the object README](../projects/kernel/README.md), which covers the current
+message set (`result`, `print`, `dict`, restart, result matching). Kept for the
+client-setup detail and troubleshooting notes.
 
 ## Prerequisites
 
@@ -218,7 +229,10 @@ Send messages to control the kernel:
 - `start` - Start the kernel server
 - `stop` - Stop the kernel server
 - `info` - Display kernel metadata
-- `eval <code>` - Evaluate code (currently echoes to outlet)
+- `eval <code>` - Echo to the right outlet (does not reach a Jupyter client)
+- `result <text>` - Answer the executing cell
+- `print <text>` - Stream output to the client
+- `dict <name>` - Send a Max dictionary as JSON
 - `bang` - Output status bang
 
 ### Connection File Format

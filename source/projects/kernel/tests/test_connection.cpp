@@ -2,13 +2,60 @@
 #include "../connection.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <set>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "nlohmann/json.hpp"
 
 namespace nl = nlohmann;
+
+namespace {
+
+// A per-process temp directory, so concurrent test runs do not collide.
+std::string test_dir() {
+    return "/tmp/mx-kernel-test-" + std::to_string(getpid());
+}
+
+// Point JUPYTER_RUNTIME_DIR at a private directory for the duration of a test.
+struct scoped_runtime_dir {
+    std::string dir;
+    std::string previous;
+    bool had_previous = false;
+
+    scoped_runtime_dir() : dir(test_dir()) {
+        if (const char* p = std::getenv("JUPYTER_RUNTIME_DIR")) {
+            previous = p;
+            had_previous = true;
+        }
+        setenv("JUPYTER_RUNTIME_DIR", dir.c_str(), 1);
+    }
+
+    ~scoped_runtime_dir() {
+        if (had_previous) {
+            setenv("JUPYTER_RUNTIME_DIR", previous.c_str(), 1);
+        } else {
+            unsetenv("JUPYTER_RUNTIME_DIR");
+        }
+        rmdir(dir.c_str());
+    }
+};
+
+xeus::xconfiguration config_with_known_ports() {
+    auto config = mx::create_kernel_configuration();
+    config.m_shell_port = "12345";
+    config.m_control_port = "12346";
+    config.m_stdin_port = "12347";
+    config.m_iopub_port = "12348";
+    config.m_hb_port = "12349";
+    return config;
+}
+
+} // namespace
 
 TEST_CASE("generate_random_key") {
     SUBCASE("produces 64-character string") {
@@ -59,23 +106,53 @@ TEST_CASE("create_kernel_configuration") {
     }
 }
 
+TEST_CASE("sanitize_kernel_name") {
+    SUBCASE("keeps safe characters") {
+        CHECK(mx::sanitize_kernel_name("my-kernel_1.2") == "my-kernel_1.2");
+    }
+
+    SUBCASE("strips path separators") {
+        CHECK(mx::sanitize_kernel_name("a/b") == "ab");
+        CHECK(mx::sanitize_kernel_name("a\\b") == "ab");
+    }
+
+    SUBCASE("cannot escape the runtime directory") {
+        // "../../etc/passwd" must not survive as a traversal.
+        const std::string cleaned = mx::sanitize_kernel_name("../../etc/passwd");
+        CHECK(cleaned.find("..") == std::string::npos);
+        CHECK(cleaned.find('/') == std::string::npos);
+        CHECK(cleaned == "etcpasswd");
+    }
+
+    SUBCASE("rejects names that are only dots") {
+        CHECK(mx::sanitize_kernel_name(".") == "");
+        CHECK(mx::sanitize_kernel_name("..") == "");
+    }
+
+    SUBCASE("strips leading dots so the file is not hidden") {
+        CHECK(mx::sanitize_kernel_name(".hidden") == "hidden");
+    }
+
+    SUBCASE("drops shell metacharacters and spaces") {
+        CHECK(mx::sanitize_kernel_name("a b; rm -rf $HOME") == "abrm-rfHOME");
+    }
+
+    SUBCASE("empty stays empty") {
+        CHECK(mx::sanitize_kernel_name("") == "");
+    }
+}
+
 TEST_CASE("write_connection_file") {
-    // Use a temp directory to avoid polluting the real runtime dir
-    std::string tmpdir = "/tmp/mx-kernel-test";
-    std::system(("mkdir -p " + tmpdir).c_str());
-
-    // Override JUPYTER_RUNTIME_DIR
-    setenv("JUPYTER_RUNTIME_DIR", tmpdir.c_str(), 1);
-
-    auto config = mx::create_kernel_configuration();
-    // Set ports to known values for testing
-    config.m_shell_port = "12345";
-    config.m_control_port = "12346";
-    config.m_stdin_port = "12347";
-    config.m_iopub_port = "12348";
-    config.m_hb_port = "12349";
+    scoped_runtime_dir runtime;
+    auto config = config_with_known_ports();
 
     std::string path = mx::write_connection_file(config, "test-kernel");
+
+    SUBCASE("creates the runtime directory if it is missing") {
+        struct stat st;
+        REQUIRE(stat(runtime.dir.c_str(), &st) == 0);
+        CHECK((st.st_mode & S_IFMT) == S_IFDIR);
+    }
 
     SUBCASE("file path includes kernel name") {
         CHECK(path.find("kernel-test-kernel.json") != std::string::npos);
@@ -97,8 +174,79 @@ TEST_CASE("write_connection_file") {
         CHECK(j["key"].get<std::string>().size() == 64);
     }
 
-    // Cleanup
+    SUBCASE("file is readable only by its owner") {
+        // It carries the HMAC key: any other local user who can read it can
+        // connect to the kernel and drive the patch.
+        struct stat st;
+        REQUIRE(stat(path.c_str(), &st) == 0);
+        const mode_t mode = st.st_mode & 0777;
+        CHECK(mode == 0600);
+        CHECK((mode & S_IRGRP) == 0);
+        CHECK((mode & S_IROTH) == 0);
+    }
+
     std::remove(path.c_str());
-    unsetenv("JUPYTER_RUNTIME_DIR");
-    std::system(("rmdir " + tmpdir + " 2>/dev/null || true").c_str());
+}
+
+TEST_CASE("write_connection_file tightens permissions on an existing file") {
+    scoped_runtime_dir runtime;
+    REQUIRE(mx::make_directories(runtime.dir));
+
+    // Pre-create the target world-readable, as a previous version would leave it.
+    const std::string path = runtime.dir + "/kernel-stale.json";
+    {
+        std::ofstream f(path);
+        f << "{}";
+    }
+    chmod(path.c_str(), 0644);
+
+    auto config = config_with_known_ports();
+    const std::string written = mx::write_connection_file(config, "stale");
+    CHECK(written == path);
+
+    struct stat st;
+    REQUIRE(stat(path.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0600);
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("write_connection_file rejects an unusable kernel name") {
+    scoped_runtime_dir runtime;
+    auto config = config_with_known_ports();
+
+    CHECK_THROWS_AS(mx::write_connection_file(config, ".."), std::runtime_error);
+}
+
+TEST_CASE("write_connection_file reports unparseable ports") {
+    scoped_runtime_dir runtime;
+    auto config = mx::create_kernel_configuration();
+    config.m_shell_port = "not-a-port";
+
+    CHECK_THROWS_AS(mx::write_connection_file(config, "bad-ports"),
+                    std::runtime_error);
+}
+
+TEST_CASE("make_directories") {
+    const std::string root = test_dir() + "-nested";
+    const std::string deep = root + "/a/b/c";
+
+    REQUIRE(mx::make_directories(deep));
+
+    struct stat st;
+    CHECK(stat(deep.c_str(), &st) == 0);
+    CHECK((st.st_mode & S_IFMT) == S_IFDIR);
+
+    SUBCASE("is idempotent") {
+        CHECK(mx::make_directories(deep));
+    }
+
+    SUBCASE("empty path fails") {
+        CHECK(!mx::make_directories(""));
+    }
+
+    rmdir((root + "/a/b/c").c_str());
+    rmdir((root + "/a/b").c_str());
+    rmdir((root + "/a").c_str());
+    rmdir(root.c_str());
 }
