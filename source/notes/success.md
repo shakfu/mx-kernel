@@ -201,5 +201,4 @@ Out[1]: Executed in Max: print("hello from jupyter")
 Follows component licenses:
 - xeus: BSD-3-Clause
 - Max SDK: Cycling '74 license
-- Project code: GPL-3.0 (see `LICENSE`; note the Max SDK compatibility caveat
-  in the root README)
+- Project code: GPL-3.0 at the time of writing; relicensed to MIT in 0.2.0

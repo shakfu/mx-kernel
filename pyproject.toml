@@ -3,6 +3,7 @@ name = "mx-kernel"
 version = "0.2.0"
 description = "A minimal jupyter kernel for Max/MSP"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.13"
 dependencies = [
     "jupyter-console>=6.6.3",

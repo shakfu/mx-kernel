@@ -151,9 +151,13 @@ and no Windows build.
 
 ## License
 
-GPL-3.0 (`LICENSE`).
+MIT (`LICENSE`), copyright Shakeeb Alireza.
 
-Note that the external links the Max SDK, whose license is not GPL-compatible;
-distributing built binaries under GPL-3 is therefore questionable. Most Max
-externals use MIT or BSD, and the vendored xeus stack is BSD-3. This should be
-settled before any release.
+Chosen to match the dependency stack, all of which is permissive: xeus and
+xeus-zmq are BSD-3, nlohmann/json and doctest are MIT, and Cycling '74's
+`max-sdk-base` is MIT. The vendored trees keep their own licences.
+
+The repository was created under GPL-3, which arrived in the first commit as a
+repository-creation default -- the boilerplate placeholders were never filled
+in and no source file carried a licence header. Relicensed to MIT in 0.2.0,
+which is unilateral here since there is only one contributor.

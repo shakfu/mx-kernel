@@ -71,6 +71,13 @@ the shutdown hang is fixed at its cause rather than worked around.
   removing a shell invocation with an interpolated `HOME`.
 - `external.cpp` split out a shared `atoms_to_string` helper that warns on
   unhandled atom types instead of silently dropping them.
+- Relicensed from GPL-3 to MIT. The GPL-3 text arrived in the initial commit
+  with its boilerplate placeholders unfilled and no source file carrying a
+  licence header, so it was a repository-creation default rather than a
+  decision. No dependency requires copyleft: xeus and xeus-zmq are BSD-3,
+  nlohmann/json, doctest and Cycling '74's max-sdk-base are MIT. MIT also
+  removes the "GPL plugin inside a proprietary host" question that arises from
+  the external being loaded into Max.
 - Documentation rewritten: the object README now documents the wire contract
   and every message, `how-to-test.md` was folded into it as a walkthrough, and
   `source/notes/` is dated and framed as historical.
@@ -141,8 +148,6 @@ None of these are specific to this project and all should be reported upstream.
   universal build needs more than enabling `C74_BUILD_FAT`.
 - Windows is unsupported. The platform-specific code has Windows branches, but
   the build has never been run there.
-- The project is GPL-3 while linking the proprietary Max SDK. This should be
-  settled before any release.
 
 ## [0.1.0] - 2025-11-07
 
