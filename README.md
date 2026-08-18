@@ -55,7 +55,13 @@ with `result <text>`. The full message set, the wire contract, and a worked
 round-trip example are in
 [source/projects/kernel/README.md](source/projects/kernel/README.md).
 
-`help/kernel.maxhelp` is a working patch that demonstrates the round trip.
+Three patches ship with it:
+
+| Patch | Purpose |
+|-------|---------|
+| `help/kernel.maxhelp` | Minimal echo loop -- proves the round trip |
+| `help/kernel-calc.maxpat` | A patch that actually evaluates: `1+1` returns `2` |
+| `help/kernel-test.maxpat` | Test rig for streaming, errors, timeouts, dicts |
 
 ## Make targets
 
@@ -101,6 +107,7 @@ source/projects/kernel/
   version.h         Single source of the version string
   tests/            doctest unit tests
   thirdparty/       Vendored xeus, xeus-zmq, nlohmann/json, doctest
+javascript/         calc.js -- the calculator example, with its own tests
 patches/            Local patches carried against the vendored trees
 script/             Build helpers (dylib bundling)
 source/notes/       Investigation records (historical)
@@ -130,12 +137,17 @@ possible), the rest are a protocol fix and CMake maintenance. See
 [patches/README.md](patches/README.md). Refreshing a vendored dependency
 silently reverts them, so run `make patch-thirdparty` afterwards.
 
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) records what changed in each version.
+
 ## Status
 
 Working proof of concept. The round trip, restart, result matching, timeouts,
-streaming, asynchronous output and clean shutdown all work. The main gaps are
-no completion or inspection content, no interrupt support, and no Windows
-build.
+streaming, asynchronous output and clean shutdown all work, and execution is
+asynchronous so a waiting cell no longer blocks the shell or control channels.
+The main gaps are no completion or inspection content, no interrupt handler,
+and no Windows build.
 
 ## License
 

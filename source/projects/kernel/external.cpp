@@ -338,6 +338,18 @@ static bool kernel_shutdown(t_kernel* x, std::chrono::milliseconds limit) {
     // its loop instead of sitting out the full result timeout.
     impl->shutdown_requested.store(true);
 
+    // Give the server loop a moment to answer cells that are still in flight.
+    // Stopping first would leave those clients waiting on a reply that can
+    // never arrive.
+    if (impl->pending_executions.load() > 0) {
+        const auto deadline = std::chrono::steady_clock::now()
+                            + std::chrono::milliseconds(500);
+        while (impl->pending_executions.load() > 0
+               && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
     try {
         impl->kernel->stop();
     } catch (...) {}

@@ -22,6 +22,7 @@ namespace {
 struct published_message {
     std::string msg_type;
     nl::json content;
+    nl::json parent; // header of the request this was attributed to
 };
 
 // Drives a max_interpreter and records everything it publishes.
@@ -34,22 +35,52 @@ struct harness {
     harness() {
         impl.set_notifier([this] { ++notify_count; });
         interp.register_publisher(
-            [this](xeus::xrequest_context, const std::string& msg_type,
+            [this](xeus::xrequest_context ctx, const std::string& msg_type,
                    nl::json, nl::json content, xeus::buffer_sequence) {
-                published.push_back({msg_type, std::move(content)});
+                published.push_back({msg_type, std::move(content), ctx.header()});
             });
     }
 
     // Run a cell to completion and return the shell reply.
+    //
+    // Execution is asynchronous now: execute_request returns immediately and
+    // the cell is completed from on_idle. This stands in for the server loop's
+    // idle tick, and runs on this thread because the pending queue is only
+    // ever touched from one thread.
     nl::json execute(const std::string& code, bool silent = false) {
         nl::json reply;
+        bool done = false;
         interp.execute_request(
             xeus::xrequest_context{},
-            [&reply](nl::json r) { reply = std::move(r); },
+            [&](nl::json r) { reply = std::move(r); done = true; },
             code,
             xeus::execute_request_config{silent, true, false},
             nl::json::object());
+
+        const auto deadline = std::chrono::steady_clock::now()
+                            + std::chrono::seconds(60);
+        while (!done && std::chrono::steady_clock::now() < deadline) {
+            interp.on_idle();
+            if (done) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        // A real server loop keeps ticking after a cell completes. A cell that
+        // finished inline (fire-and-forget) would not otherwise have reached an
+        // idle tick, which is where free-standing output gets published.
+        interp.on_idle();
         return reply;
+    }
+
+    // Start a cell without driving it to completion, for tests that need to
+    // observe the kernel while a cell is in flight.
+    void begin(const std::string& code, nl::json* reply, bool* done) {
+        interp.execute_request(
+            xeus::xrequest_context{},
+            [reply, done](nl::json r) { *reply = std::move(r); *done = true; },
+            code,
+            xeus::execute_request_config{false, true, false},
+            nl::json::object());
     }
 
     // Answer the cell that is currently executing, from another thread.
@@ -79,7 +110,150 @@ struct max_side {
     ~max_side() { if (t.joinable()) t.join(); }
 };
 
+// A request context that can be told apart in published output.
+xeus::xrequest_context labelled(const std::string& label) {
+    nl::json header;
+    header["msg_id"] = label;
+    return xeus::xrequest_context(std::move(header), xeus::xrequest_context::guid_list{});
+}
+
 } // namespace
+
+TEST_CASE("execute_request returns without waiting for Max") {
+    harness h;
+    h.impl.timeout.store(30); // would be a 30s stall if execution blocked
+
+    nl::json reply;
+    bool done = false;
+
+    const auto start = std::chrono::steady_clock::now();
+    h.begin("nobody will answer this", &reply, &done);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // This is the head-of-line fix: the server thread goes straight back to
+    // polling, so other shell and control requests keep being served.
+    CHECK(elapsed < std::chrono::milliseconds(200));
+    CHECK(!done);
+    CHECK(h.impl.pending_executions.load() == 1);
+
+    // The code still reached Max immediately -- no idle tick needed.
+    CHECK(h.impl.outlet_queue.size() == 1);
+
+    // Let it finish so the harness tears down cleanly.
+    h.impl.alive.store(false);
+    h.interp.on_idle();
+    CHECK(done);
+}
+
+TEST_CASE("a second cell is accepted while the first is still waiting") {
+    harness h;
+    h.impl.timeout.store(30);
+
+    nl::json r1, r2;
+    bool d1 = false, d2 = false;
+
+    h.begin("first", &r1, &d1);
+    h.begin("second", &r2, &d2);
+
+    CHECK(h.impl.pending_executions.load() == 2);
+    CHECK(!d1);
+    CHECK(!d2);
+
+    // Only the first has been handed to Max: cells run one at a time, which is
+    // what the shell channel promises.
+    CHECK(h.impl.outlet_queue.size() == 1);
+
+    // Answer the first.
+    mx::ResultMessage a;
+    a.text = "one";
+    a.execution_counter = h.impl.current_execution.load();
+    h.impl.result_queue.push(std::move(a));
+    h.interp.on_idle();
+
+    CHECK(d1);
+    CHECK(!d2);
+    CHECK(r1["status"] == "ok");
+
+    // Now the second has been handed to Max.
+    CHECK(h.impl.outlet_queue.size() == 2);
+    CHECK(h.impl.pending_executions.load() == 1);
+
+    mx::ResultMessage b;
+    b.text = "two";
+    b.execution_counter = h.impl.current_execution.load();
+    h.impl.result_queue.push(std::move(b));
+    h.interp.on_idle();
+
+    CHECK(d2);
+    CHECK(r2["status"] == "ok");
+    CHECK(h.impl.pending_executions.load() == 0);
+}
+
+TEST_CASE("a deferred cell publishes under its own request context") {
+    harness h;
+    h.impl.timeout.store(30);
+
+    nl::json r1, r2;
+    bool d1 = false, d2 = false;
+
+    // Cell one starts and is left waiting.
+    h.interp.execute_request(labelled("cell-one"),
+                             [&](nl::json r) { r1 = std::move(r); d1 = true; },
+                             "first", xeus::execute_request_config{false, true, false},
+                             nl::json::object());
+
+    // Cell two arrives while cell one is in flight. xeus overwrites its single
+    // request context here -- the reason get_request_context is overridden.
+    h.interp.execute_request(labelled("cell-two"),
+                             [&](nl::json r) { r2 = std::move(r); d2 = true; },
+                             "second", xeus::execute_request_config{false, true, false},
+                             nl::json::object());
+
+    // Answer cell one, with some streamed output first.
+    mx::ResultMessage progress;
+    progress.stream_name = "stdout";
+    progress.text = "from cell one";
+    progress.execution_counter = h.impl.current_execution.load();
+    h.impl.result_queue.push(std::move(progress));
+
+    mx::ResultMessage a;
+    a.text = "one";
+    a.execution_counter = h.impl.current_execution.load();
+    h.impl.result_queue.push(std::move(a));
+
+    h.interp.on_idle();
+    REQUIRE(d1);
+
+    auto streams = h.of_type("stream");
+    REQUIRE(streams.size() == 1);
+    auto results = h.of_type("execute_result");
+    REQUIRE(results.size() == 1);
+
+    // Both must be attributed to cell one, not to whichever request arrived
+    // last. Getting this wrong puts cell one's output on cell two.
+    CHECK(streams[0].parent["msg_id"] == "cell-one");
+    CHECK(results[0].parent["msg_id"] == "cell-one");
+}
+
+TEST_CASE("cells still in flight are answered when the kernel shuts down") {
+    harness h;
+    h.impl.timeout.store(30);
+
+    nl::json reply;
+    bool done = false;
+    h.begin("waiting on max", &reply, &done);
+    REQUIRE(!done);
+
+    // A client requests shutdown while the cell waits.
+    h.interp.shutdown_request();
+    h.interp.on_idle();
+
+    // Dropping the cell would leave the client waiting for a reply forever.
+    CHECK(done);
+    CHECK(reply["status"] == "error");
+    CHECK(reply["ename"] == "MaxShutdown");
+    CHECK(h.impl.pending_executions.load() == 0);
+}
 
 TEST_CASE("execute pushes code to the outlet and wakes the main thread") {
     harness h;
@@ -318,7 +492,7 @@ TEST_CASE("a result stamped for another cell is discarded, not delivered") {
     CHECK(h.of_type("execute_result").empty());
 }
 
-TEST_CASE("async output queued outside a cell is flushed on the next cell") {
+TEST_CASE("async output queued outside a cell is flushed on an idle tick") {
     harness h;
     h.impl.timeout.store(0);
 
@@ -457,6 +631,8 @@ TEST_CASE("kernel_info reports the max language") {
     CHECK(info["implementation"] == "max_kernel");
     CHECK(info["protocol_version"] == "5.3");
     CHECK(info["language_info"]["name"] == "max");
+    // Without this clients warn that no lexer exists for language "max".
+    CHECK(info["language_info"]["pygments_lexer"] == "text");
     CHECK(info["implementation_version"] == MX_KERNEL_VERSION);
 }
 

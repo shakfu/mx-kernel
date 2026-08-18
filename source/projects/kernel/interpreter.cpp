@@ -45,10 +45,6 @@ void max_interpreter::configure_impl() {
     // Nothing to configure
 }
 
-void max_interpreter::on_idle() {
-    flush_async_output();
-}
-
 void max_interpreter::flush_async_output() {
     while (auto out = m_impl->async_queue.try_pop()) {
         const std::string name = out->stream_name.empty() ? std::string("stdout")
@@ -57,94 +53,132 @@ void max_interpreter::flush_async_output() {
     }
 }
 
+void max_interpreter::set_request_context(xeus::xrequest_context context) {
+    m_dispatch_context = std::move(context);
+}
+
+const xeus::xrequest_context& max_interpreter::get_request_context() const noexcept {
+    return m_has_active ? m_active_context : m_dispatch_context;
+}
+
 void max_interpreter::execute_request_impl(send_reply_callback cb,
                                            int execution_counter,
                                            const std::string& code,
                                            xeus::execute_request_config config,
                                            nl::json user_expressions) {
-    // Discard replies left over from earlier cells. Without this a duplicated
-    // or late result is delivered as the answer to this cell, and every
-    // subsequent cell stays off by one.
+    // Queue the cell and return without replying. xeus registers
+    // execute_request as non-blocking precisely so a kernel can do this; the
+    // reply callback carries its own context, and publishes the trailing idle
+    // status itself when we eventually call it.
+    pending_execution p;
+    p.cb = std::move(cb);
+    p.context = m_dispatch_context;
+    p.counter = execution_counter;
+    p.code = code;
+    p.silent = config.silent;
+    p.timeout_s = m_impl->timeout.load();
+
+    m_pending.push_back(std::move(p));
+    m_impl->pending_executions.store(static_cast<int>(m_pending.size()));
+
+    // Hand it to Max straight away rather than waiting for the next idle tick.
+    pump();
+
+    // Note: xeus::xinterpreter::execute_request has already published the
+    // execution_input for this cell.
+}
+
+void max_interpreter::start_front() {
+    pending_execution& p = m_pending.front();
+
+    // Drop replies left over from an earlier cell before this one can see
+    // them, then declare this cell the one results belong to.
     m_impl->result_queue.clear();
+    m_impl->current_execution.store(p.counter);
 
-    // Publish anything Max queued while no cell was running.
-    if (!config.silent) {
-        flush_async_output();
-    }
-
-    // From here until we return, results arriving from Max belong to this cell.
-    execution_scope scope(m_impl, execution_counter);
-
-    // 1. Hand the code to the Max patch via the left outlet.
     OutletMessage msg;
     msg.selector = "code";
     msg.atoms.push_back(std::string("execute"));
-    msg.atoms.push_back(code);
+    msg.atoms.push_back(p.code);
     msg.outlet_index = 0; // left outlet
-    msg.execution_counter = execution_counter;
+    msg.execution_counter = p.counter;
 
     m_impl->outlet_queue.push(std::move(msg));
     m_impl->notify_main_thread();
 
-    // Note: xeus::xinterpreter::execute_request has already published the
-    // execution_input for this cell. Publishing it again here would emit a
-    // duplicate In[n] on IOPub.
+    p.deadline = std::chrono::steady_clock::now()
+               + std::chrono::seconds(p.timeout_s > 0 ? p.timeout_s : 0);
+    p.started = true;
+}
 
-    // 2. Fire-and-forget mode: do not wait for the patch to answer.
-    const long timeout_s = m_impl->timeout.load();
-    if (timeout_s <= 0) {
-        nl::json reply;
-        reply["status"] = "ok";
-        reply["execution_count"] = execution_counter;
-        reply["user_expressions"] = nl::json::object();
-        reply["payload"] = nl::json::array();
-        cb(reply);
-        return;
+void max_interpreter::complete_front(nl::json reply) {
+    send_reply_callback cb = std::move(m_pending.front().cb);
+    m_pending.pop_front();
+    m_impl->current_execution.store(0);
+    m_impl->pending_executions.store(static_cast<int>(m_pending.size()));
+    cb(std::move(reply));
+}
+
+namespace {
+
+nl::json ok_reply(int counter) {
+    nl::json reply;
+    reply["status"] = "ok";
+    reply["execution_count"] = counter;
+    reply["user_expressions"] = nl::json::object();
+    reply["payload"] = nl::json::array();
+    return reply;
+}
+
+nl::json error_reply(const std::string& ename, const std::string& evalue) {
+    nl::json reply;
+    reply["status"] = "error";
+    reply["ename"] = ename;
+    reply["evalue"] = evalue;
+    reply["traceback"] = nl::json::array();
+    return reply;
+}
+
+} // namespace
+
+bool max_interpreter::service_front() {
+    pending_execution& p = m_pending.front();
+
+    if (!p.started) {
+        start_front();
     }
 
-    // 3. Wait for a terminal result, publishing intermediate output as it lands.
-    const auto deadline = std::chrono::steady_clock::now()
-                        + std::chrono::seconds(timeout_s);
-    bool got_result = false;
+    // Fire and forget: the cell is done as soon as Max has the code.
+    if (p.timeout_s <= 0) {
+        const int counter = p.counter;
+        complete_front(ok_reply(counter));
+        return true;
+    }
 
-    while (!got_result) {
-        if (!m_impl->alive.load() || m_impl->shutdown_requested.load()) {
-            break;
+    // Teardown or a client shutdown: answer rather than leave the client
+    // waiting on a reply that will never come.
+    if (!m_impl->alive.load() || m_impl->shutdown_requested.load()) {
+        const std::string evalue = "kernel is shutting down";
+        if (!p.silent) {
+            publish_execution_error("MaxShutdown", evalue, {});
         }
+        complete_front(error_reply("MaxShutdown", evalue));
+        return true;
+    }
 
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) {
-            break;
-        }
-
-        const auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-        auto result = m_impl->result_queue.wait_pop(std::min(remaining, k_wait_slice));
-
-        // Nothing yet -- drain async output so long-running cells still stream.
-        if (!result.has_value()) {
-            if (!config.silent) {
-                flush_async_output();
-            }
-            continue;
-        }
-
+    while (auto result = m_impl->result_queue.try_pop()) {
         const ResultMessage& r = result.value();
 
         // A reply stamped for a different cell is stale; drop it.
-        if (r.execution_counter != execution_counter) {
+        if (r.execution_counter != p.counter) {
             continue;
         }
 
         if (r.is_error()) {
             publish_execution_error(r.error_name, r.error_value, {});
-            nl::json reply;
-            reply["status"] = "error";
-            reply["ename"] = r.error_name;
-            reply["evalue"] = r.error_value;
-            reply["traceback"] = nl::json::array();
-            cb(reply);
-            return;
+            nl::json reply = error_reply(r.error_name, r.error_value);
+            complete_front(std::move(reply));
+            return true;
         }
 
         // Intermediate output: publish it and keep waiting for the result.
@@ -159,36 +193,56 @@ void max_interpreter::execute_request_impl(send_reply_callback cb,
         } else {
             data["text/plain"] = r.text;
         }
-        publish_execution_result(execution_counter, std::move(data), nl::json::object());
-        got_result = true;
+        publish_execution_result(p.counter, std::move(data), nl::json::object());
+        const int counter = p.counter;
+        complete_front(ok_reply(counter));
+        return true;
     }
 
-    if (got_result) {
-        nl::json reply;
-        reply["status"] = "ok";
-        reply["execution_count"] = execution_counter;
-        reply["user_expressions"] = nl::json::object();
-        reply["payload"] = nl::json::array();
-        cb(reply);
-        return;
+    if (std::chrono::steady_clock::now() < p.deadline) {
+        return false; // still waiting
     }
 
-    // 5. No result within the deadline. A timeout is not a success -- report it
-    //    as an error so programmatic clients can tell the difference.
+    // No result within the deadline. A timeout is not a success -- report it
+    // as an error so programmatic clients can tell the difference.
     const std::string ename = "MaxTimeout";
     const std::string evalue =
-        "no result from Max within " + std::to_string(timeout_s) + "s: " + code;
+        "no result from Max within " + std::to_string(p.timeout_s) + "s: " + p.code;
 
-    if (!config.silent) {
+    if (!p.silent) {
         publish_execution_error(ename, evalue, {});
     }
+    complete_front(error_reply(ename, evalue));
+    return true;
+}
 
-    nl::json reply;
-    reply["status"] = "error";
-    reply["ename"] = ename;
-    reply["evalue"] = evalue;
-    reply["traceback"] = nl::json::array();
-    cb(reply);
+void max_interpreter::pump() {
+    while (!m_pending.empty()) {
+        // Publish under the context of the cell being serviced, so its output
+        // is attributed to it and not to whichever request arrived last.
+        m_active_context = m_pending.front().context;
+        m_has_active = true;
+        const bool completed = service_front();
+        m_has_active = false;
+
+        if (!completed) {
+            break;
+        }
+    }
+}
+
+void max_interpreter::on_idle() {
+    if (!m_pending.empty()) {
+        // Attribute free-standing output to the cell that is running.
+        m_active_context = m_pending.front().context;
+        m_has_active = true;
+        flush_async_output();
+        m_has_active = false;
+    } else {
+        flush_async_output();
+    }
+
+    pump();
 }
 
 nl::json max_interpreter::complete_request_impl(const std::string& code,
@@ -229,6 +283,12 @@ nl::json max_interpreter::kernel_info_request_impl() {
     language_info["version"] = "8.0";
     language_info["mimetype"] = "text/x-maxmsp";
     language_info["file_extension"] = ".maxpat";
+    // Clients resolve a syntax highlighter from pygments_lexer, falling back to
+    // `name`. There is no "max" lexer, so without this jupyter-console warns
+    // "No lexer found for language 'max'" on every connect. Max messages have
+    // no highlighter to offer, so name the plain-text one deliberately.
+    language_info["pygments_lexer"] = "text";
+    language_info["codemirror_mode"] = "null";
 
     reply["language_info"] = language_info;
     reply["banner"] = "Max/MSP Jupyter Kernel v" MX_KERNEL_VERSION;

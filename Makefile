@@ -18,7 +18,7 @@ define section
 endef
 
 .PHONY: all build rebuild clean setup update-submodules link connect test \
-        install-kernelspec patch-thirdparty
+        test-cpp test-js install-kernelspec patch-thirdparty
 
 all: build
 
@@ -49,12 +49,24 @@ patch-thirdparty:
 	$(call section,"applying thirdparty patches")
 	@./patches/apply.sh
 
-test:
-	$(call section,"building and running unit tests")
+test: test-cpp test-js
+
+test-cpp:
+	$(call section,"building and running C++ unit tests")
 	@mkdir -p build-test && cd build-test && \
 		cmake .. -DBUILD_TESTS=ON && \
 		cmake --build . --target kernel_tests --config Release && \
 		./source/projects/kernel/tests/kernel_tests
+
+# The calculator example's parser is plain ES5 and testable outside Max.
+# Skipped rather than failed when node is absent: it is not a build dependency.
+test-js:
+	$(call section,"running javascript tests")
+	@if command -v node >/dev/null 2>&1; then \
+		node javascript/tests/test_calc.js ; \
+	else \
+		echo "node not found -- skipping javascript tests" ; \
+	fi
 
 connect:
 	@test -f "$(RUNTIME_DIR)/kernel-$(NAME).json" || \

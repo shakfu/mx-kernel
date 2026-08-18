@@ -23,7 +23,10 @@ jobs:
         run: ./patches/apply.sh
 
       - name: Build and run unit tests
-        run: make test
+        run: make test-cpp
+
+      - name: Run javascript tests
+        run: node javascript/tests/test_calc.js
 
   build-external:
     name: build external (macOS)

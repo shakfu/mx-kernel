@@ -70,6 +70,11 @@ struct t_kernel_impl {
     // no cell is waiting. Read by the main thread to stamp incoming results.
     std::atomic<int> current_execution{0};
 
+    // Number of cells queued or in flight. Maintained by the interpreter on
+    // the server thread; read by the main thread during shutdown, which waits
+    // briefly for in-flight cells to be answered rather than dropping them.
+    std::atomic<int> pending_executions{0};
+
     // Seconds to wait for a result before giving up. 0 or less means
     // fire-and-forget: the cell returns as soon as the code reaches the outlet.
     std::atomic<long> timeout{30};

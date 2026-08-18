@@ -98,6 +98,51 @@ Without it, every cell waits for `@timeout` seconds and then fails with
 `MaxTimeout`. That is the intended signal: a cell that nobody answered did not
 succeed.
 
+### A patch that evaluates rather than echoes
+
+The echo loop above proves the round trip but computes nothing: `1+1` comes
+back as `1+1`. `help/kernel-calc.maxpat` is the same loop with an evaluator in
+the middle, so `1+1` comes back as `2`:
+
+```
+[kernel @name calc @timeout 10]
+ |    ^
+ |    |
+[route code]
+ |
+[route execute]
+ |
+[js calc.js]        <- emits a complete `result ...` message
+ |
+(back to the kernel inlet)
+```
+
+`javascript/calc.js` parses the expression itself rather than calling `eval`,
+so a cell cannot execute arbitrary code, and it works in both the classic `[js]`
+engine and `[v8]`. It supports the usual operators with correct precedence
+(`^` binds tightest and is right associative), parentheses, `pi` and `e`, and
+the common `Math` functions.
+
+It emits the whole message, both paths included:
+
+```
+result 2
+result error ZeroDivisionError division by zero
+```
+
+so a bad expression fails the cell with a real error rather than returning the
+word "error" as a value. The parser has its own tests (`make test` runs them
+when node is present).
+
+Two things this example illustrates about the wire contract:
+
+- **The cell text arrives as the message selector.** `[route execute]` strips
+  the leading `execute`, and what remains is a single symbol, so downstream it
+  is the message *name* with no arguments. `calc.js` rebuilds the text from
+  `messagename` plus any arguments, which is why it works either way.
+- **`Out[n]` should be the value.** Anything explanatory belongs in `print`, so
+  the result stays machine-readable.
+
 ## Messages
 
 - **bang** -- output a bang from the right outlet.
@@ -133,7 +178,8 @@ succeed.
 - **timeout** (int, seconds, default 30) -- how long a cell waits for a
   `result` before failing with `MaxTimeout`. Set `@timeout 0` for
   fire-and-forget: cells return `ok` as soon as the code reaches the outlet,
-  without waiting for any answer.
+  without waiting for any answer. Waiting no longer blocks the kernel -- see
+  "Execution model" -- so a long timeout costs responsiveness nothing.
 
 ## How results are matched to cells
 
@@ -231,12 +277,48 @@ patch is missing -- run `make patch-thirdparty` and rebuild.
 `print hello`. It should appear in the client within a fraction of a second,
 without needing to run a cell.
 
+## Execution model
+
+Cells are executed asynchronously. `execute_request` hands the code to Max and
+returns immediately without replying; the cell is completed later from the
+server loop's idle tick, when Max answers or the timeout expires.
+
+This matters because the server loop polls the shell *and* control channels on
+one thread and dispatches inline. Waiting for Max inside the request would park
+that thread, so nothing else was served -- including `shutdown_request` and
+`interrupt_request` on the control channel, which the Jupyter protocol requires
+to be answerable *during* execution. A patch that never replied made the kernel
+unreachable for the full `@timeout`.
+
+xeus supports this directly: `execute_request` is registered as a non-blocking
+handler, and the reply callback carries its own request context and publishes
+the trailing `idle` status itself.
+
+Cells still run one at a time. A request that arrives while another is in
+flight is queued and handed to Max when its turn comes, which is what the shell
+channel promises.
+
+One visible consequence: xeus publishes `execute_input` when a request is
+dispatched, not when it starts running. A client that queues several cells at
+once will see all their `In[n]` numbers appear immediately, with outputs
+filling in as each completes.
+
+### Output attribution
+
+xeus keeps a single request context and every `publish_*` reads it, so a
+request arriving mid-flight would otherwise overwrite it and put the running
+cell's output on the newer cell. `max_interpreter` overrides
+`set_request_context`/`get_request_context` so a deferred cell publishes under
+its own context. `tests/test_interpreter.cpp` pins this.
+
 ## Threading
 
 - The kernel runs on its own thread. `start` returns immediately.
 - Kernel thread to Max: messages go through a queue and a `qelem`, so
   `outlet_anything` is only ever called on Max's main thread.
-- Max to kernel thread: a second queue, drained by the cell that is waiting.
+- Max to kernel thread: a second queue, drained by the server loop.
+- `execute_request_impl` and the idle callback both run on the server thread,
+  so the pending-cell queue needs no lock.
 - The object's C++ state lives behind a pimpl (`t_kernel_impl`) allocated with
   `operator new`, so Max's C allocator never touches non-trivial C++ members.
 
