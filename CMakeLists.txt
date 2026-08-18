@@ -90,6 +90,30 @@ foreach (cat_dir ${CATEGORY_DIRS})
   endforeach ()
 endforeach ()
 
+#############################################################
+# DEPLOYMENT TARGET
+#############################################################
+# max-pretarget.cmake force-pins CMAKE_OSX_DEPLOYMENT_TARGET to 10.11, but the
+# C++17 library facilities this project and the vendored xeus-zmq rely on are
+# annotated unavailable below that: std::optional::value() needs 10.13 and
+# std::filesystem needs 10.15. Recent Apple toolchains have dropped some of
+# those annotations, so a new Xcode builds 10.11 happily while an older one
+# (Xcode 15.4, as on GitHub's macos-14 runners) fails outright.
+#
+# Set it after the subdirectories are added, so this wins over the SDK's FORCE;
+# CMake reads the cache at generate time, so every target picks it up.
+#
+# 10.11 was fiction in any case: the Homebrew libzmq and libcrypto bundled into
+# the external are themselves built for far newer macOS.
+set(MX_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING
+    "Minimum macOS version the external supports")
+
+if (APPLE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${MX_OSX_DEPLOYMENT_TARGET}" CACHE STRING
+        "Minimum OS X deployment version" FORCE)
+    message(STATUS "CMAKE_OSX_DEPLOYMENT_TARGET set to ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+endif ()
+
 # Unit tests (no Max SDK dependency)
 if (BUILD_TESTS)
     enable_testing()

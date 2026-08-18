@@ -110,6 +110,13 @@ the shutdown hang is fixed at its cause rather than worked around.
   `xkernel::stop()` reaches the same handler as a client request.
 - Console messages are no longer double-prefixed (`kernel: kernel: ...`), since
   Max already prefixes the object name.
+- Builds on toolchains older than the author's. `max-pretarget.cmake` pins the
+  macOS deployment target to 10.11, but `std::optional::value()` is annotated
+  unavailable below 10.13 and `std::filesystem` below 10.15. Recent Apple
+  toolchains have dropped some of those annotations, so the project built
+  locally on Xcode 26 and failed on GitHub's macos-14 runners (Xcode 15.4).
+  The target is now set to 10.15 after the SDK's own FORCE, overridable with
+  `-DMX_OSX_DEPLOYMENT_TARGET=`.
 - `make clean` removes `externals` -- it was misspelled `exterals`, so stale
   builds survived every clean. `.phony` corrected to `.PHONY`, the undefined
   `section` macro defined, `build` made incremental, and `connect` takes

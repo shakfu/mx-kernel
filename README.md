@@ -16,7 +16,7 @@ Jupyter client  <--ZMQ-->  xeus-zmq  <-->  max_interpreter  <-->  Max outlets
 
 ## Requirements
 
-- macOS (Apple silicon or Intel), Max 8 or 9
+- macOS 10.15 or later (Apple silicon or Intel), Max 8 or 9
 - CMake 3.19+, a C++17 compiler
 - Homebrew: `brew install zeromq openssl@3 cppzmq nlohmann-json`
 - [uv](https://docs.astral.sh/uv/) for the Jupyter client used by `make connect`
