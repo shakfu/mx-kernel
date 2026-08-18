@@ -104,7 +104,7 @@ None of these are specific to this project and all should be reported upstream.
 
 - Windows is unsupported. The platform-specific code has Windows branches, but the build has never been run there.
 
-## [0.1.0] - 2025-11-07
+## [0.1.0]
 
 First working proof of concept: a Jupyter kernel embedded in a Max external, with bidirectional messaging between a Jupyter client and a Max patch over ZMQ.
 
